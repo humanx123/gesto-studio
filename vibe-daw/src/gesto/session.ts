@@ -39,6 +39,8 @@ export interface GestoSettings {
   bassStyle: BassStyle;
   /** Bass sound; null = the groove's own. */
   bassPreset: string | null;
+  /** Blur the camera feed so faces stay out of frame while the hand tracking still works. */
+  privacy: boolean;
 }
 
 export type GestoInput = 'off' | 'camera' | 'keyboard';
@@ -59,6 +61,8 @@ interface GestoState {
   captured: number;
   /** The band is placing notes right now (needs the song playing). */
   bandLive: boolean;
+  /** True when the video is blurred for privacy; the hand tracker still runs. */
+  privacy: boolean;
   setSettings: (patch: Partial<GestoSettings>) => void;
 }
 
@@ -74,7 +78,7 @@ function loadSettings(): GestoSettings {
   const key = gestoKeyFor(getProject().key);
   const base: GestoSettings = {
     keyOffset: key.keyOffset, harmony: key.harmony, style: 'fingers', octave: 0, bass: false, arp: 0, quantize: 0.25,
-    band: false, groove: 'boombap', percussion: false, bassStyle: 'kick', bassPreset: null,
+    band: false, groove: 'boombap', percussion: false, bassStyle: 'kick', bassPreset: null, privacy: false,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as Partial<Record<keyof GestoSettings, unknown>>;
@@ -91,6 +95,7 @@ function loadSettings(): GestoSettings {
       percussion: typeof saved.percussion === 'boolean' ? saved.percussion : base.percussion,
       bassStyle: BASS_IDS.includes(saved.bassStyle as BassStyle) ? (saved.bassStyle as BassStyle) : base.bassStyle,
       bassPreset: typeof saved.bassPreset === 'string' ? saved.bassPreset : null,
+      privacy: typeof saved.privacy === 'boolean' ? saved.privacy : base.privacy,
     };
   } catch {
     return base;
@@ -110,6 +115,8 @@ export const useGesto = create<GestoState>((set, get) => ({
   recording: false,
   captured: 0,
   bandLive: false,
+  /** True when the video is blurred for privacy; the hand tracker still runs. */
+  privacy: false,
   setSettings: (patch) => {
     const before = get().settings;
     const settings = { ...before, ...patch };
@@ -244,6 +251,8 @@ export function cameraVideo(): HTMLVideoElement {
     video.autoplay = true;
     video.setAttribute('playsinline', '');
   }
+  const p = useGesto.getState().privacy;
+  video.style.filter = p ? 'blur(38px) brightness(0.6)' : '';
   return video;
 }
 

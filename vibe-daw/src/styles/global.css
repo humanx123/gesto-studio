@@ -254,8 +254,14 @@
   white-space: nowrap;
   overflow: hidden;
 }
-.ruler .loop-region { position: absolute; top: 21px; height: 3px; border-radius: 3px; background: rgba(255, 181, 71, 0.3); pointer-events: none; }
-.ruler .loop-region.on { background: var(--signal); }
+.ruler .loop-region { position: absolute; top: 17px; height: 12px; border-radius: 4px; background: rgba(255, 181, 71, 0.28); border: 1px solid var(--signal); pointer-events: auto; cursor: ew-resize; box-sizing: border-box; }
+.ruler .loop-region.on { background: rgba(255, 181, 71, 0.45); }
+.ruler .loop-region::before, .ruler .loop-region::after {
+  content: ""; position: absolute; top: 50%; width: 6px; height: 12px; transform: translateY(-50%);
+  background: var(--signal); border-radius: 2px;
+}
+.ruler .loop-region::before { left: 1px; }
+.ruler .loop-region::after { right: 1px; }
 
 .track-row { display: flex; height: var(--track-h); border-bottom: 1px solid var(--line-soft); }
 

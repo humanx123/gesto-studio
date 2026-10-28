@@ -87,6 +87,12 @@ async function checkGemini(key) {
   if (!res.ok) throw new Error(`Google respondió ${res.status}. Prueba otra vez en un momento.`);
 }
 
+// The studio's AI terms checkbox lives in Settings; accept it here too so the first trip to
+// /studio does not stop on a consent dialog before the key is even usable.
+function acceptConsent() {
+  try { localStorage.setItem('vibe:ai-consent', '2026-10-20'); } catch { /* storage disabled */ }
+}
+
 async function checkFree(key) {
   const res = await fetch('https://text.pollinations.ai/openai', {
     method: 'POST',
@@ -121,6 +127,7 @@ $('form-ia').addEventListener('submit', async (e) => {
     const s = read(SETTINGS_KEY, {});
     if (provider === 'free') {
       await checkFree(key);
+      acceptConsent();
       write(SETTINGS_KEY, { ...s, provider: 'free', freeKey: key, freeModel: 'openai' });
       status('Lista. El productor usará el modelo gratis (GPT-OSS 20B, sin clave).', 'ok');
     } else if (provider === 'groq') {
@@ -128,11 +135,13 @@ $('form-ia').addEventListener('submit', async (e) => {
       if (available.length) fillModels(available.map((id) => [id, id]));
       const chosen = model || GROQ_SUGGESTED[0][0];
       const warn = available.length && !available.includes(chosen) ? ` Ojo: «${chosen}» no aparece en tu cuenta de Groq; elige uno de la lista.` : '';
+      acceptConsent();
       write(SETTINGS_KEY, { ...s, provider: 'groq', groqKey: key, groqModel: chosen });
       status(`Lista. El productor usará Groq (${chosen}).${warn}`, warn ? 'mal' : 'ok');
     } else {
       await checkGemini(key);
       const chosen = GEMINI_MODELS.some(([id]) => id === model) ? model : GEMINI_MODELS[0][0];
+      acceptConsent();
       write(SETTINGS_KEY, { ...s, provider: 'gemini', apiKey: key, connection: 'apikey', model: chosen });
       status(`Lista. El productor usará Gemini (${chosen}).`, 'ok');
     }

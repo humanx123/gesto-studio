@@ -11,7 +11,7 @@ import {
   startRecording, stopInput, stopRecording, toggleJam, useGesto,
 } from '../../gesto/session';
 import { BASS_STYLES, GROOVES, type BassStyle, type Groove } from '../../gesto/band';
-import { Square, LoaderCircle, Metronome, Piano, CircleAlert, Play, Drum } from '../icons';
+import { Square, LoaderCircle, Metronome, Piano, CircleAlert, Play, Drum, Eye } from '../icons';
 
 // Gesto mode: the third way to make music in the studio, next to the Producer's Agent and Ask.
 // Hands in front of the camera (or Gesture Synth's keys) play chords on a track; Record
@@ -176,6 +176,7 @@ function BandSettings() {
 function Settings() {
   const s = useGesto((x) => x.settings);
   const set = useGesto((x) => x.setSettings);
+  const input = useGesto((x) => x.input);
   const trackId = useGesto((x) => x.trackId);
   const tracks = useDaw((x) => x.project.tracks);
   const metronome = useTransport((x) => x.metronome);
@@ -243,6 +244,9 @@ function Settings() {
       <div className="gesto-toggles">
         <label className="toggle"><input type="checkbox" checked={s.bass} onChange={(e) => set({ bass: e.target.checked })} /><span>Auto bass</span></label>
         <label className="toggle"><input type="checkbox" checked={metronome} onChange={(e) => useTransport.getState().setMetronome(e.target.checked)} /><span><Metronome size={13} /> Metronome</span></label>
+        {input === 'camera' && (
+          <label className="toggle"><input type="checkbox" checked={useGesto.getState().privacy} onChange={(e) => useGesto.getState().setSettings({ privacy: e.target.checked })} /><span><Eye size={13} /> Blur video (privacy)</span></label>
+        )}
       </div>
     </div>
   );

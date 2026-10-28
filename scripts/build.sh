@@ -16,7 +16,11 @@ rm -rf dist && mkdir dist
 cp -r vibe-daw/dist/. dist/
 # Vibe's empty app shell: every studio route uses it (its own landing page is replaced by the launcher).
 cp dist/index.html dist/app.html
-mkdir -p dist/studio && cp dist/index.html dist/studio/index.html
+mkdir -p dist/studio/assets && cp dist/index.html dist/studio/index.html
+# Copy studio-specific assets so /studio/assets/ serves them too.
+cp dist/assets/studio-*.js dist/assets/studio-*.css dist/studio/assets/ 2>/dev/null || true
+# Replace old asset references in studio/index.html with new studio-specific ones
+sed -i 's|/assets/index-BfWV6Sd5.js|/assets/studio-Bff68wNW.js|g; s|/assets/index-DIUNIuAR.css|/assets/studio-CyxdF-96.css|g' dist/studio/index.html
 cp -r gesture-synth/dist dist/gesto
 cp hub/index.html hub/hub.css hub/hub.js hub/hub-icon.svg dist/
 BUILD=$(date -u +%Y%m%d%H%M)

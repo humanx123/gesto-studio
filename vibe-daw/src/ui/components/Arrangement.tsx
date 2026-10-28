@@ -18,6 +18,7 @@ import { saveSelectedClips } from './SavePreset';
 import { openInlineAI } from './InlineAI';
 import { MousePointer2, Bookmark } from '../icons';
 import { aiAvailable, useSettings } from '../../state/settings';
+import { acknowledgeAi, hasAiConsent } from '../../legal/acceptance';
 import { tip, useKeymap } from '../../state/keymap';
 import { toast } from '../toast';
 import { useTheme } from '../../state/theme';
@@ -131,10 +132,16 @@ function Ruler({ project, zoom, width }: { project: Project; zoom: number; width
   const snap = useDaw((s) => s.snap);
   const every = zoom * bpb < 26 ? 4 : zoom * bpb < 50 ? 2 : 1;
   const loopRef = useRef<{ startBeat: number } | null>(null);
+  // Dragging the loop bar itself: which edge, and the beat it started on.
+  const loopDrag = useRef<{ edge: 'start' | 'end'; startBeat: number } | null>(null);
 
   const beatAt = (e: RPointerEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     return Math.max(0, (e.clientX - rect.left) / uiZoom() / zoom);
+  };
+
+  const setLoop = (start: number, end: number) => {
+    update('Set loop', (d) => { d.loop = { enabled: true, start, end }; }, { coalesce: true });
   };
 
   return (
@@ -148,23 +155,45 @@ function Ruler({ project, zoom, width }: { project: Project; zoom: number; width
         onPointerDown={(e) => {
           if (e.button !== 0) return;
           const b = beatAt(e);
+          const el = e.currentTarget as HTMLElement;
+          // Drag the loop bar (or one of its edges) directly.
+          if (project.loop.end > project.loop.start) {
+            const s = project.loop.start, e2 = project.loop.end;
+            const near = (x: number) => Math.abs(b - x) < 0.3;
+            if (near(s) || near(e2) || (b > s - 0.3 && b < e2 + 0.3)) {
+              loopDrag.current = { edge: b < (s + e2) / 2 ? 'start' : 'end', startBeat: b };
+              el.setPointerCapture(e.pointerId);
+              return;
+            }
+          }
           if (e.shiftKey) {
             const s = snapBeat(b, snap === -1 ? 0 : snap, bpb);
             loopRef.current = { startBeat: s };
-            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            el.setPointerCapture(e.pointerId);
           } else {
             scrub(e, (ev) => beatAt(ev as unknown as RPointerEvent), bpb);
           }
         }}
         onPointerMove={(e) => {
+          if (loopDrag.current) {
+            const b = snapBeat(beatAt(e), snap <= 0 ? bpb : snap, bpb);
+            const { edge } = loopDrag.current;
+            const other = edge === 'start' ? project.loop.end : project.loop.start;
+            // Dragging the start left past the end, or the end right past the start, flips the edge.
+            if (edge === 'start' && b > other - 0.25) setLoop(other, Math.max(other + 0.25, b));
+            else if (edge === 'end' && b < other + 0.25) setLoop(Math.min(other - 0.25, b), other);
+            else if (edge === 'start') setLoop(Math.min(b, other - 0.25), other);
+            else setLoop(other, Math.max(other + 0.25, b));
+            return;
+          }
           if (!loopRef.current) return;
           const b = snapBeat(beatAt(e), snap <= 0 ? bpb : snap, bpb);
           const a = loopRef.current.startBeat;
           if (Math.abs(b - a) < 0.25) return;
-          update('Set loop', (d) => { d.loop = { enabled: true, start: Math.min(a, b), end: Math.max(a, b) }; }, { coalesce: true });
+          setLoop(Math.min(a, b), Math.max(a, b));
         }}
-        onPointerUp={() => { loopRef.current = null; }}
-        title="Click or drag to move the playhead · Shift-drag to set the loop"
+        onPointerUp={() => { loopDrag.current = null; loopRef.current = null; }}
+        title="Drag the loop bar or its edges to move it · Shift-drag on empty space to set it"
       >
         {Array.from({ length: bars + 1 }, (_, i) => (
           <div key={i}>
@@ -298,17 +327,50 @@ function KeySetup() {
   );
 }
 
+/** Same AI terms as Settings, for when a key is already saved (from the hub) but never accepted. */
+function ConsentOnly() {
+  const [accepted, setAccepted] = useState(false);
+  return (
+    <>
+      <h1>One last step: accept the AI terms.</h1>
+      <p>Your key is already saved. Before the Producer can use it, confirm you are 18 or older and agree to Vibe's <a href="/terms/" target="_blank" rel="noopener noreferrer">Terms</a> and <a href="/privacy/" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>
+      <p className="hero-foot">Prompts, project details and voice messages go to the provider you picked (Google, Groq or Pollinations). Avoid personal or sensitive material.</p>
+      <label className="toggle hero-accept">
+        <input type="checkbox" checked={accepted} onChange={(e) => setAccepted(e.target.checked)} />
+        <span>I am 18 or older, I agree, and I will use the AI for professional or business purposes.</span>
+      </label>
+      <div className="hero-actions">
+        <button className="btn primary" disabled={!accepted} onClick={() => { acknowledgeAi(true); close(); }}>Accept and continue</button>
+      </div>
+    </>
+  );
+}
+
 /** Shown only until the user connects a Gemini key; after that the empty arrangement stays clear. */
 function EmptyHero() {
   const [dismissed, setDismissed] = useState(readDismissed);
-  useSettings((s) => s.apiKey + s.connection + s.provider + s.groqKey); // re-render when a key or provider is set
+  useSettings((s) => s.apiKey + s.connection + s.provider + s.groqKey + s.freeKey); // re-render when a key or provider is set
   const close = () => {
     setDismissed(true);
     try { localStorage.setItem(HERO_DISMISSED, '1'); } catch { /* storage disabled */ }
   };
   // The native studio is usable without AI or an external account/key.
   // Key setup remains available when the user chooses the Producer or Settings.
-  if (isNativeApp() || dismissed || aiAvailable().ok) return null;
+  if (isNativeApp() || dismissed) return null;
+  // A key or provider is already saved (from the hub or a previous session) but the AI
+  // terms were never accepted: ask for that one thing instead of making them re-enter the key.
+  if (!hasAiConsent() && (useSettings.getState().apiKey || useSettings.getState().groqKey || useSettings.getState().provider === 'free')) {
+    return createPortal(
+      <div className="empty-arrange">
+        <div className="hero-card">
+          <button className="btn icon hero-close" onClick={close} aria-label="Close" title="Close"><X size={16} /></button>
+          <ConsentOnly />
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+  if (aiAvailable().ok) return null;
   // Portaled to <body>: the arrangement's container query contains fixed descendants.
   return createPortal(
     <div className="empty-arrange">
