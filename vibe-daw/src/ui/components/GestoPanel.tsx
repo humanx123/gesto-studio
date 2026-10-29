@@ -245,7 +245,7 @@ function Settings() {
         <label className="toggle"><input type="checkbox" checked={s.bass} onChange={(e) => set({ bass: e.target.checked })} /><span>Auto bass</span></label>
         <label className="toggle"><input type="checkbox" checked={metronome} onChange={(e) => useTransport.getState().setMetronome(e.target.checked)} /><span><Metronome size={13} /> Metronome</span></label>
         {input === 'camera' && (
-          <label className="toggle"><input type="checkbox" checked={useGesto.getState().privacy} onChange={(e) => useGesto.getState().setSettings({ privacy: e.target.checked })} /><span><Eye size={13} /> Blur video (privacy)</span></label>
+          <label className="toggle"><input type="checkbox" checked={useGesto((s) => s.privacy)} onChange={(e) => useGesto.getState().setSettings({ privacy: e.target.checked })} /><span><Eye size={13} /> Blur video (privacy)</span></label>
         )}
       </div>
     </div>

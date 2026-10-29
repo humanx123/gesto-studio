@@ -134,6 +134,11 @@ function Ruler({ project, zoom, width }: { project: Project; zoom: number; width
   const loopRef = useRef<{ startBeat: number } | null>(null);
   // Dragging the loop bar itself: which edge, and the beat it started on.
   const loopDrag = useRef<{ edge: 'start' | 'end'; startBeat: number } | null>(null);
+  // Keep a ref to the latest loop boundaries so handlers always read fresh values.
+  const loopBoundsRef = useRef({ start: project.loop.start, end: project.loop.end });
+  useEffect(() => {
+    loopBoundsRef.current = { start: project.loop.start, end: project.loop.end };
+  }, [project.loop.start, project.loop.end]);
 
   const beatAt = (e: RPointerEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -178,7 +183,8 @@ function Ruler({ project, zoom, width }: { project: Project; zoom: number; width
           if (loopDrag.current) {
             const b = snapBeat(beatAt(e), snap <= 0 ? bpb : snap, bpb);
             const { edge } = loopDrag.current;
-            const other = edge === 'start' ? project.loop.end : project.loop.start;
+            const { start, end } = loopBoundsRef.current;
+            const other = edge === 'start' ? end : start;
             // Dragging the start left past the end, or the end right past the start, flips the edge.
             if (edge === 'start' && b > other - 0.25) setLoop(other, Math.max(other + 0.25, b));
             else if (edge === 'end' && b < other + 0.25) setLoop(Math.min(other - 0.25, b), other);
@@ -328,7 +334,7 @@ function KeySetup() {
 }
 
 /** Same AI terms as Settings, for when a key is already saved (from the hub) but never accepted. */
-function ConsentOnly() {
+function ConsentOnly({ onClose }: { onClose: () => void }) {
   const [accepted, setAccepted] = useState(false);
   return (
     <>
@@ -340,7 +346,7 @@ function ConsentOnly() {
         <span>I am 18 or older, I agree, and I will use the AI for professional or business purposes.</span>
       </label>
       <div className="hero-actions">
-        <button className="btn primary" disabled={!accepted} onClick={() => { acknowledgeAi(true); close(); }}>Accept and continue</button>
+        <button className="btn primary" disabled={!accepted} onClick={() => { acknowledgeAi(true); onClose(); }}>Accept and continue</button>
       </div>
     </>
   );
@@ -364,7 +370,7 @@ function EmptyHero() {
       <div className="empty-arrange">
         <div className="hero-card">
           <button className="btn icon hero-close" onClick={close} aria-label="Close" title="Close"><X size={16} /></button>
-          <ConsentOnly />
+          <ConsentOnly onClose={close} />
         </div>
       </div>,
       document.body,
