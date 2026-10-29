@@ -38,5 +38,10 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    resolve: {
+      alias: {
+        '@gesto': fileURLToPath(new URL('../gesture-synth/src', import.meta.url)),
+      },
+    },
   },
 });
