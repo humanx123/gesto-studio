@@ -19,8 +19,16 @@ cp dist/index.html dist/app.html
 mkdir -p dist/studio/assets && cp dist/index.html dist/studio/index.html
 # Copy studio-specific assets so /studio/assets/ serves them too.
 cp dist/assets/studio-*.js dist/assets/studio-*.css dist/studio/assets/ 2>/dev/null || true
-# Replace old asset references in studio/index.html with new studio-specific ones
-sed -i 's|/assets/index-BfWV6Sd5.js|/assets/studio-Bff68wNW.js|g; s|/assets/index-DIUNIuAR.css|/assets/studio-CyxdF-96.css|g' dist/studio/index.html
+# Replace asset references in studio/index.html with the studio-specific hashes found in the build.
+STUDIO_JS=$(ls dist/assets/studio-*.js 2>/dev/null | head -1 | xargs -I{} basename {})
+STUDIO_CSS=$(ls dist/assets/studio-*.css 2>/dev/null | head -1 | xargs -I{} basename {})
+MAIN_JS=$(ls dist/assets/index-*.js 2>/dev/null | head -1 | xargs -I{} basename {})
+if [ -n "$STUDIO_JS" ]; then
+  sed -i "s|/assets/${MAIN_JS}|/assets/${STUDIO_JS}|g" dist/studio/index.html
+fi
+if [ -n "$STUDIO_CSS" ]; then
+  sed -i "s|/assets/index-*.css|/assets/${STUDIO_CSS}|g" dist/studio/index.html
+fi
 cp -r gesture-synth/dist dist/gesto
 cp hub/index.html hub/hub.css hub/hub.js hub/hub-icon.svg dist/
 BUILD=$(date -u +%Y%m%d%H%M)
