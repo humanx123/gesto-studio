@@ -33,6 +33,9 @@ cp -r gesture-synth/dist dist/gesto
 cp hub/index.html hub/hub.css hub/hub.js hub/hub-icon.svg dist/
 BUILD=$(date -u +%Y%m%d%H%M)
 sed -i "s/__BUILD__/$BUILD/g" dist/index.html
+# Inject the legal version from the studio's acceptance.ts so the hub and the studio agree.
+LEGAL_VERSION=$(sed -n "s/.*export const LEGAL_VERSION = '\([^']*\)'.*/\1/p" vibe-daw/src/legal/acceptance.ts)
+sed -i "s/__LEGAL_VERSION__/$LEGAL_VERSION/g" dist/hub.js
 
 cat > dist/_headers << 'HEADERS'
 /sw.js

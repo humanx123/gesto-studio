@@ -89,8 +89,9 @@ async function checkGemini(key) {
 
 // The studio's AI terms checkbox lives in Settings; accept it here too so the first trip to
 // /studio does not stop on a consent dialog before the key is even usable.
+// The version is injected at build time from vibe-daw/src/legal/acceptance.ts (single source).
 function acceptConsent() {
-  try { localStorage.setItem('vibe:ai-consent', '2026-10-20'); } catch { /* storage disabled */ }
+  try { localStorage.setItem('vibe:ai-consent', '__LEGAL_VERSION__'); } catch { /* storage disabled */ }
 }
 
 async function checkFree(key) {
