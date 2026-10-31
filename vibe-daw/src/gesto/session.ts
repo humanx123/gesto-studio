@@ -345,6 +345,8 @@ export async function startCamera() {
     const v = cameraVideo();
     v.srcObject = stream;
     await v.play().catch(() => undefined);
+        // Ensure video is visible even if CSS failed to apply the live class.
+        v.style.display = 'block';
     await tracking;
     if (useGesto.getState().input !== 'camera') return;
     camera.reset();

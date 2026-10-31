@@ -4,7 +4,7 @@ import type { DrumLane } from '../model/types';
 // Patterns are one 4/4 bar of 16ths in step strings (X accent, x hit, o ghost, . rest);
 // other meters repeat them over their own bar length.
 
-export type Groove = 'off' | 'boombap' | 'trap' | 'house' | 'lofi' | 'reggaeton';
+export type Groove = 'off' | 'boombap' | 'trap' | 'house' | 'lofi' | 'reggaeton' | 'dnb' | 'halftime' | 'disco';
 export type BassStyle = 'off' | 'kick' | 'roots' | 'octaves' | 'walk';
 export type DrumKit = 'trap' | 'boombap' | 'lofi' | 'house';
 
@@ -14,6 +14,9 @@ export const GROOVES: Array<{ id: Groove; name: string; kit: DrumKit; bassPreset
   { id: 'house', name: 'House', kit: 'house', bassPreset: 'fm_bass' },
   { id: 'lofi', name: 'Lo-fi', kit: 'lofi', bassPreset: 'electric_bass' },
   { id: 'reggaeton', name: 'Reggaetón (dembow)', kit: 'trap', bassPreset: 'sub_bass' },
+  { id: 'dnb', name: 'DnB', kit: 'trap', bassPreset: 'reese' },
+  { id: 'halftime', name: 'Halftime', kit: 'trap', bassPreset: 'sub_bass' },
+  { id: 'disco', name: 'Disco', kit: 'house', bassPreset: 'electric_bass' },
 ];
 
 export const BASS_STYLES: Array<{ id: BassStyle; name: string }> = [
@@ -50,6 +53,21 @@ const PATTERNS: Record<Exclude<Groove, 'off'>, Record<string, string>> = {
     snare: '...X..X....X..X.',
     hat: 'x.x.x.x.x.x.x.x.',
   },
+  dnb: {
+    kick: 'X.......X...x...',
+    snare: '....X.......X...',
+    hat: 'x.x.x.x.x.x.x.x.',
+  },
+  halftime: {
+    kick: 'X.......X.......',
+    snare: '........X.......',
+    hat: 'xxxxxxx.xxxxxxxx',
+  },
+  disco: {
+    kick: 'X.X.X.X.X.X.X.X.',
+    snare: '....X.......X...',
+    hat: '.x.x.x.x.x.x.x.x',
+  },
 };
 
 /** The extra percussion layer, on whichever percussion lane the kit has. */
@@ -59,6 +77,9 @@ const PERCUSSION: Record<Exclude<Groove, 'off'>, string> = {
   house: 'x..x..x...x..x..',
   lofi: 'o.xo.oxo.o.xo.ox',
   reggaeton: 'oxoxoxoxoxoxoxox',
+  dnb: '...x...x...x...x',
+  halftime: 'x...x...x...x...',
+  disco: 'x...x...x...x...',
 };
 
 /** A missing lane falls back to its closest relative in the kit. */

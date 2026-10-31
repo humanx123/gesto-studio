@@ -49,9 +49,14 @@ export const PRESETS: PresetInfo[] = [
     params: { release: { default: 1.2, min: 0.1, max: 5, label: 'Release (s)' } },
   },
   {
-    id: 'pluck_guitar', name: 'Synth Pluck Guitar', family: 'guitar', range: [40, 84],
-    description: 'Karplus-Strong plucked string. Works offline, lo-fi and intimate.',
-    params: { dampening: { default: 3500, min: 500, max: 9000, label: 'Dampening (Hz)' }, resonance: { default: 0.92, min: 0.5, max: 0.99, label: 'Sustain' } },
+    id: 'shoegaze_guitar', name: 'Shoegaze Guitar', family: 'guitar', range: [40, 84],
+    description: 'Walls of sound. Heavily chorused, reversed reverb, dream-pop washed-out textures. Perfect for ethereal, avant-garde walls.',
+    params: { release: { default: 2.0, min: 0.5, max: 8, label: 'Release (s)' }, drive: { default: 0.6, min: 0, max: 1, label: 'Fuzz' }, shimmer: { default: 0.8, min: 0, max: 1, label: 'Wash' } },
+  },
+  {
+    id: 'avant_synth', name: 'Avant-Garde Synth', family: 'synth', range: [36, 96],
+    description: 'FM and ring-mod hybrid synth. Unpredictable metallic textures, glitchy and dissonant.',
+    params: { cutoff: { default: 2000, min: 100, max: 10000, label: 'Cutoff (Hz)' }, fmAmount: { default: 400, min: 0, max: 2000, label: 'FM Amount' } },
   },
   {
     id: 'bass808', name: '808', family: 'bass', range: [24, 48],
