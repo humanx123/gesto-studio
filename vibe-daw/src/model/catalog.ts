@@ -49,6 +49,11 @@ export const PRESETS: PresetInfo[] = [
     params: { release: { default: 1.2, min: 0.1, max: 5, label: 'Release (s)' } },
   },
   {
+    id: 'pluck_guitar', name: 'Synth Pluck Guitar', family: 'guitar', range: [40, 84],
+    description: 'Karplus-Strong plucked string. Works offline, lo-fi and intimate.',
+    params: { dampening: { default: 3500, min: 500, max: 9000, label: 'Dampening (Hz)' }, resonance: { default: 0.92, min: 0.5, max: 0.99, label: 'Sustain' } },
+  },
+  {
     id: 'shoegaze_guitar', name: 'Shoegaze Guitar', family: 'guitar', range: [40, 84],
     description: 'Walls of sound. Heavily chorused, reversed reverb, dream-pop washed-out textures. Perfect for ethereal, avant-garde walls.',
     params: { release: { default: 2.0, min: 0.5, max: 8, label: 'Release (s)' }, drive: { default: 0.6, min: 0, max: 1, label: 'Fuzz' }, shimmer: { default: 0.8, min: 0, max: 1, label: 'Wash' } },

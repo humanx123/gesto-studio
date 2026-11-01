@@ -163,7 +163,9 @@ function eight08(spec: InstrumentSpec, body: AudioBuffer): Instrument {
 // ------------------------------------------------------------------ Karplus-Strong pluck pool
 
 function pluckGuitar(spec: InstrumentSpec): Instrument {
-  let p = { ...defaultPresetParams('pluck_guitar'), ...spec.params };
+  // Every guitar without samples lands here (and sampled ones whose download failed), so the
+  // string's own defaults must always be present: Tone throws on an undefined dampening.
+  let p = { dampening: 3500, resonance: 0.92, ...defaultPresetParams('pluck_guitar'), ...spec.params };
   const out = new Tone.Gain(1.4);
   const body = new Tone.Filter({ type: 'peaking', frequency: 220, Q: 1, gain: 4 }).connect(out);
   const voices = Array.from({ length: 8 }, () => new Tone.PluckSynth({ attackNoise: 1.2, dampening: p.dampening, resonance: p.resonance }).connect(body));
