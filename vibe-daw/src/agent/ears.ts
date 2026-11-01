@@ -18,8 +18,8 @@ const MAX_LISTEN_SECONDS = 60;
 /** Only Gemini hears audio. On Groq or the free model the tools fail loudly instead of inventing what they "heard". */
 function requireEars() {
   const provider = useSettings.getState().provider;
-  if (provider === 'groq' || provider === 'free') {
-    throw new Error(`Listening needs Gemini: ${provider === 'groq' ? 'Groq models' : 'the free model'} cannot hear audio. Switch the AI provider to Gemini in Settings to use the ears.`);
+  if (provider === 'groq' || provider === 'free' || provider === 'freellmapi') {
+    throw new Error(`Listening needs Gemini: ${provider === 'groq' ? 'Groq models' : provider === 'freellmapi' ? 'FreeLLMAPI models' : 'the free model'} cannot hear audio. Switch the AI provider to Gemini in Settings to use the ears.`);
   }
 }
 

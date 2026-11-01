@@ -180,3 +180,38 @@ describe('Free provider (Pollinations, no key)', () => {
     await expect(listen({ project: {} as never } as never)).rejects.toThrow(/the free model cannot hear audio/);
   });
 });
+
+describe('FreeLLMAPI transport', () => {
+  beforeEach(() => {
+    useSettings.getState().set({ provider: 'freellmapi', freellmapiUrl: 'http://127.0.0.1:31415/v1/', freellmapiKey: 'freellmapi-test', freellmapiModel: 'auto' });
+  });
+
+  it('calls the user\'s gateway with its key and model, without reasoning fields', async () => {
+    fetchMock.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: 'Hola' }, finish_reason: 'stop' }] }]));
+    const res = await streamGenerate({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }], thinking: 'HIGH' });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:31415/v1/chat/completions');
+    expect(init.headers.Authorization).toBe('Bearer freellmapi-test');
+    const body = JSON.parse(init.body);
+    expect(body.model).toBe('auto');
+    expect(body).not.toHaveProperty('reasoning_effort');
+    expect(res.content.parts.map((p) => p.text).join('')).toBe('Hola');
+  });
+
+  it('transcribes voice messages through the gateway', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ text: 'add drums' }), { status: 200 }))
+      .mockResolvedValueOnce(sse([{ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }]));
+    await streamGenerate({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data: btoa('RIFFvoice') } }] }] });
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:31415/v1/audio/transcriptions');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).messages.at(-1).content).toContain('add drums');
+  });
+
+  it('needs a key, refuses to listen, and explains an unreachable server', async () => {
+    useSettings.getState().set({ freellmapiKey: '' });
+    await expect(streamGenerate({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] })).rejects.toThrow(/FreeLLMAPI key/);
+    vi.stubGlobal('location', { origin: 'https://gesto.example' });
+    expect(explainError(new TypeError('Failed to fetch'))).toMatch(/DASHBOARD_ORIGINS=https:\/\/gesto\.example/);
+    expect(explainError(new Error('FreeLLMAPI 401: bad key'))).toMatch(/rejected the key/);
+  });
+});

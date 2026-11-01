@@ -5,7 +5,8 @@ import {
 } from '../icons';
 import { useAgent, runAgent, stopAgent, keepChanges, revertTo, type ChatItem } from '../../agent/agent';
 import { analyzeReference } from '../../agent/ears';
-import { useSettings, MODELS, GROQ_MODELS, FREE_MODELS, aiAvailable } from '../../state/settings';
+import { useSettings, MODELS, GROQ_MODELS, FREE_MODELS, FREELLMAPI_MODELS, aiAvailable } from '../../state/settings';
+import { useGatewayModels } from '../useGatewayModels';
 import { useDaw } from '../../state/store';
 import { Markdown } from '../Markdown';
 import { Dropdown } from './Dropdown';
@@ -136,7 +137,11 @@ export function AgentPanel({ open, focusSignal, onClose }: { open: boolean; focu
   const groqModel = useSettings((s) => s.groqModel);
   const groqKey = useSettings((s) => s.groqKey);
   const freeModel = useSettings((s) => s.freeModel);
-  const modelLabel = provider === 'groq' ? GROQ_MODELS.find((m) => m.id === groqModel)?.name ?? groqModel
+  const gwModel = useSettings((s) => s.freellmapiModel);
+  const gwKey = useSettings((s) => s.freellmapiKey);
+  const gwList = useGatewayModels(!!gwKey.trim());
+  const modelLabel = provider === 'freellmapi' ? FREELLMAPI_MODELS.find((m) => m.id === gwModel)?.name ?? gwList.models.find((m) => m.id === gwModel)?.name ?? gwModel
+    : provider === 'groq' ? GROQ_MODELS.find((m) => m.id === groqModel)?.name ?? groqModel
     : provider === 'free' ? FREE_MODELS.find((m) => m.id === freeModel)?.name ?? freeModel
     : MODELS.find((m) => m.id === model)?.name;
   const [text, setText] = useState('');
@@ -369,6 +374,12 @@ export function AgentPanel({ open, focusSignal, onClose }: { open: boolean; focu
               {FREE_MODELS.map((m) => {
                 const on = provider === 'free' && freeModel === m.id;
                 return <button key={m.id} className="menu-item" role="option" aria-selected={on} onClick={() => { useSettings.getState().set({ provider: 'free', freeModel: m.id }); close(); }}><b>{m.name}{on && <Check size={13} />}</b><span>{m.blurb}</span></button>;
+              })}
+              <div className="menu-divider" />
+              <div className="menu-heading">FreeLLMAPI{gwKey ? gwList.state === 'error' ? ' · not reachable' : '' : ' · add your key (Settings → AI)'}</div>
+              {[...FREELLMAPI_MODELS, ...gwList.models.filter((m) => m.available && !FREELLMAPI_MODELS.some((f) => f.id === m.id)).slice(0, 12).map((m) => ({ id: m.id, name: m.name, blurb: m.id }))].map((m) => {
+                const on = provider === 'freellmapi' && gwModel === m.id;
+                return <button key={`gw-${m.id}`} className="menu-item" role="option" aria-selected={on} onClick={() => { useSettings.getState().set({ provider: 'freellmapi', freellmapiModel: m.id }); close(); }}><b>{m.name}{on && <Check size={13} />}</b><span>{m.blurb}</span></button>;
               })}
             </>}>{modelLabel}</Dropdown>
             <div className="spacer" />

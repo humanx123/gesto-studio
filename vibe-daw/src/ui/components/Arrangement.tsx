@@ -365,7 +365,7 @@ function EmptyHero() {
   if (isNativeApp() || dismissed) return null;
   // A key or provider is already saved (from the hub or a previous session) but the AI
   // terms were never accepted: ask for that one thing instead of making them re-enter the key.
-  if (!hasAiConsent() && (useSettings.getState().apiKey || useSettings.getState().groqKey || useSettings.getState().provider === 'free')) {
+  if (!hasAiConsent() && (useSettings.getState().apiKey || useSettings.getState().groqKey || useSettings.getState().provider === 'free' || useSettings.getState().provider === 'freellmapi')) {
     return createPortal(
       <div className="empty-arrange">
         <div className="hero-card">

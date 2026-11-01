@@ -29,7 +29,17 @@ export const FREE_MODELS = [
 ] as const;
 export const DEFAULT_FREE_MODEL = FREE_MODELS[0].id;
 
-export type Provider = 'gemini' | 'groq' | 'free';
+// FreeLLMAPI: the user's own gateway (github.com/tashfeenahmed/freellmapi) that pools many free
+// providers behind one OpenAI-style API. It runs on their device, so the browser talks to it
+// directly; the server must list this site in DASHBOARD_ORIGINS for CORS.
+export const DEFAULT_FREELLMAPI_URL = 'http://127.0.0.1:31415/v1';
+export const FREELLMAPI_MODELS = [
+  { id: 'auto', name: 'Auto (FreeLLMAPI)', blurb: 'The gateway picks the best free model that is up right now.' },
+  { id: 'gemma-4-26b-a4b-it-musica', name: 'Gemma 4 26B Música', blurb: 'Tuned for music. Needs a Routeway key in the FreeLLMAPI dashboard.' },
+] as const;
+export const DEFAULT_FREELLMAPI_MODEL = FREELLMAPI_MODELS[0].id;
+
+export type Provider = 'gemini' | 'groq' | 'free' | 'freellmapi';
 export type Connection = 'firebase' | 'apikey';
 export type Thinking = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type ListeningQuality = 'full' | 'balanced' | 'compact';
@@ -46,6 +56,10 @@ interface SettingsState {
   /** Optional Pollinations token for the free provider. */
   freeKey: string;
   freeModel: string;
+  /** Base URL of the user's FreeLLMAPI server, ending in /v1. */
+  freellmapiUrl: string;
+  freellmapiKey: string;
+  freellmapiModel: string;
   thinking: Thinking;
   /** Let the agent bounce and listen to its own work without asking. */
   autoListen: boolean;
@@ -80,7 +94,7 @@ export type SettingsValues = Omit<SettingsState, 'set'>;
 /** Fill defaults and drop invalid values, for localStorage and for settings synced from another device. */
 export function sanitizeSettings(saved: Partial<Record<keyof SettingsValues, unknown>>): SettingsValues {
   return {
-    provider: saved.provider === 'groq' || saved.provider === 'free' ? saved.provider : 'gemini',
+    provider: saved.provider === 'groq' || saved.provider === 'free' || saved.provider === 'freellmapi' ? saved.provider : 'gemini',
     model: MODELS.some((m) => m.id === saved.model) ? (saved.model as ModelId) : 'gemini-3.8-flash',
     connection: hostedAiEnabled ? (saved.connection === 'apikey' ? 'apikey' : 'firebase') : 'apikey',
     apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : '',
@@ -88,6 +102,9 @@ export function sanitizeSettings(saved: Partial<Record<keyof SettingsValues, unk
     groqModel: typeof saved.groqModel === 'string' && saved.groqModel.trim() ? saved.groqModel.trim() : DEFAULT_GROQ_MODEL,
     freeKey: typeof saved.freeKey === 'string' ? saved.freeKey : '',
     freeModel: typeof saved.freeModel === 'string' && saved.freeModel.trim() ? saved.freeModel.trim() : DEFAULT_FREE_MODEL,
+    freellmapiUrl: typeof saved.freellmapiUrl === 'string' && /^https?:\/\//.test(saved.freellmapiUrl.trim()) ? saved.freellmapiUrl.trim().replace(/\/+$/, '') : DEFAULT_FREELLMAPI_URL,
+    freellmapiKey: typeof saved.freellmapiKey === 'string' ? saved.freellmapiKey : '',
+    freellmapiModel: typeof saved.freellmapiModel === 'string' && saved.freellmapiModel.trim() ? saved.freellmapiModel.trim() : DEFAULT_FREELLMAPI_MODEL,
     thinking: THINKING.includes(saved.thinking as Thinking) ? (saved.thinking as Thinking) : 'MEDIUM',
     autoListen: typeof saved.autoListen === 'boolean' ? saved.autoListen : true,
     customInstructions: typeof saved.customInstructions === 'string' ? saved.customInstructions.slice(0, MAX_CUSTOM_INSTRUCTIONS) : '',
@@ -119,6 +136,9 @@ export function aiAvailable(): { ok: boolean; reason?: string } {
   if (!hasAiConsent()) return { ok: false, reason: 'Review the AI terms and data notice in Settings before using the agent.' };
   const s = useSettings.getState();
   if (s.provider === 'free') return { ok: true };
+  if (s.provider === 'freellmapi') {
+    return s.freellmapiKey.trim() ? { ok: true } : { ok: false, reason: 'Add your FreeLLMAPI key in Settings to use the agent.' };
+  }
   if (s.provider === 'groq') {
     return s.groqKey.trim() ? { ok: true } : { ok: false, reason: 'Add a Groq API key in Settings to use the agent.' };
   }
@@ -126,4 +146,17 @@ export function aiAvailable(): { ok: boolean; reason?: string } {
     return hostedAiEnabled ? { ok: true } : { ok: false, reason: 'Add your Gemini API key in Settings to use the agent.' };
   }
   return effectiveApiKey() ? { ok: true } : { ok: false, reason: 'Add a Gemini API key in Settings to use the agent.' };
+}
+
+export interface GatewayModel { id: string; name: string; available: boolean }
+
+/** The models a FreeLLMAPI server offers, available ones first. Throws when it can't be reached. */
+export async function fetchFreellmapiModels(url: string, key: string, signal?: AbortSignal): Promise<GatewayModel[]> {
+  const res = await fetch(`${url.replace(/\/+$/, '')}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal });
+  if (!res.ok) throw new Error(`FreeLLMAPI ${res.status}`);
+  const body = (await res.json()) as { data?: Array<{ id?: unknown; name?: unknown; available?: unknown }> };
+  return (body.data ?? [])
+    .filter((m): m is { id: string; name?: unknown; available?: unknown } => typeof m.id === 'string')
+    .map((m) => ({ id: m.id, name: typeof m.name === 'string' ? m.name : m.id, available: m.available !== false }))
+    .sort((a, b) => Number(b.available) - Number(a.available));
 }

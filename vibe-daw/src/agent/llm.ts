@@ -11,6 +11,7 @@ function requireAiConsent() {
 //  - 'firebase' → Firebase AI Logic (production: no key in the bundle, App Check enforced)
 //  - 'groq'     → Groq's OpenAI-style API with the user's own key (provider setting)
 //  - 'free'     → Pollinations' OpenAI-style API: open models, no key needed
+//  - 'freellmapi' → the user's own FreeLLMAPI gateway (OpenAI-style, many free providers)
 // Parts are passed through untouched so Gemini 3+ thought signatures survive the round trip.
 
 export interface Part {
@@ -168,7 +169,7 @@ async function streamFirebase(req: LlmRequest, h: StreamHandlers): Promise<LlmRe
 }
 
 // ---------------------------------------------------------------- OpenAI-style hosts (Groq, free)
-// Neither host takes audio: Groq transcribes voice messages with Whisper first, the free host
+// No host takes audio: Groq and FreeLLMAPI transcribe voice messages with Whisper first, the free host
 // leaves them out, and the listening tools (ears.ts) refuse to run. Reasoning streams to
 // onThought but is not kept in history, so switching back to Gemini mid-chat never sends it
 // foreign thought parts.
@@ -179,19 +180,24 @@ const WHISPER_MODEL = 'whisper-large-v3-turbo';
 
 interface CompatHost {
   /** Starts every error ("Groq 429: …") so explainError can tell hosts apart. */
-  name: 'Groq' | 'Pollinations';
+  name: 'Groq' | 'Pollinations' | 'FreeLLMAPI';
   chatUrl: string;
   /** Empty for the free host without a token. */
   key: string;
   model: string;
-  /** Groq transcribes voice messages; the free host can't. */
-  transcribes: boolean;
+  /** Where voice messages go to become text (Whisper); null when the host can't. */
+  transcribeUrl: string | null;
 }
 
 function compatHost(): CompatHost {
   const s = useSettings.getState();
-  if (s.provider === 'free') return { name: 'Pollinations', chatUrl: FREE_CHAT, key: s.freeKey.trim(), model: s.freeModel, transcribes: false };
-  return { name: 'Groq', chatUrl: `${GROQ_API}/chat/completions`, key: groqKey(), model: s.groqModel, transcribes: true };
+  if (s.provider === 'free') return { name: 'Pollinations', chatUrl: FREE_CHAT, key: s.freeKey.trim(), model: s.freeModel, transcribeUrl: null };
+  if (s.provider === 'freellmapi') {
+    const key = s.freellmapiKey.trim();
+    if (!key) throw new Error('No FreeLLMAPI key. Add it in Settings.');
+    return { name: 'FreeLLMAPI', chatUrl: `${s.freellmapiUrl}/chat/completions`, key, model: s.freellmapiModel, transcribeUrl: `${s.freellmapiUrl}/audio/transcriptions` };
+  }
+  return { name: 'Groq', chatUrl: `${GROQ_API}/chat/completions`, key: groqKey(), model: s.groqModel, transcribeUrl: `${GROQ_API}/audio/transcriptions` };
 }
 
 const authHeader = (key: string): Record<string, string> => (key ? { Authorization: `Bearer ${key}` } : {});
@@ -228,7 +234,7 @@ async function hostError(name: CompatHost['name'], res: Response): Promise<Error
 // The agent resends a run's history every turn, so each voice clip is transcribed once.
 const transcripts = new Map<string, string>();
 
-async function transcribe(audio: NonNullable<Part['inlineData']>, signal?: AbortSignal): Promise<string> {
+async function transcribe(audio: NonNullable<Part['inlineData']>, host: CompatHost, signal?: AbortSignal): Promise<string> {
   const id = `${audio.data.length}:${audio.data.slice(0, 96)}:${audio.data.slice(-96)}`;
   const known = transcripts.get(id);
   if (known !== undefined) return known;
@@ -236,8 +242,8 @@ async function transcribe(audio: NonNullable<Part['inlineData']>, signal?: Abort
   const form = new FormData();
   form.append('file', new Blob([bytes], { type: audio.mimeType }), 'voice.wav');
   form.append('model', WHISPER_MODEL);
-  const res = await fetch(`${GROQ_API}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${groqKey()}` }, body: form, signal });
-  if (!res.ok) throw await hostError('Groq', res);
+  const res = await fetch(host.transcribeUrl!, { method: 'POST', headers: authHeader(host.key), body: form, signal });
+  if (!res.ok) throw await hostError(host.name, res);
   const text = (((await res.json()) as { text?: string }).text ?? '').trim();
   transcripts.set(id, text);
   return text;
@@ -269,8 +275,8 @@ async function toGroqMessages(req: LlmRequest, host: CompatHost): Promise<GroqMe
         const id = i >= 0 ? open.splice(i, 1)[0].id : r.id ?? `call_${next++}`;
         out.push({ role: 'tool', tool_call_id: id, content: JSON.stringify(r.response) });
       } else if (p.inlineData?.mimeType.startsWith('audio/')) {
-        texts.push(host.transcribes
-          ? `[Voice message, transcribed] ${await transcribe(p.inlineData, req.signal)}`
+        texts.push(host.transcribeUrl
+          ? `[Voice message, transcribed] ${await transcribe(p.inlineData, host, req.signal)}`
           : '(A voice message was left out: this free model cannot hear audio. Ask the user to type the request.)');
       } else if (p.inlineData) {
         texts.push(`(An attachment was left out: the ${host.name} model in use cannot see it.)`);
@@ -345,7 +351,9 @@ async function streamCompat(req: LlmRequest, h: StreamHandlers): Promise<LlmResu
   const model = host.model;
   // The free host cuts every reply at 1500 tokens whatever max_tokens says, and GPT-OSS can spend
   // all of them reasoning before it acts. Low effort leaves room for the tool calls.
-  const reasoning = host.name !== 'Groq' ? { reasoning_effort: 'low' }
+  // FreeLLMAPI routes to many providers; extra reasoning fields make some of them answer 400.
+  const reasoning = host.name === 'FreeLLMAPI' ? {}
+    : host.name !== 'Groq' ? { reasoning_effort: 'low' }
     : model.startsWith('openai/gpt-oss') ? { reasoning_effort: GROQ_EFFORT[req.thinking ?? 'MEDIUM'], include_reasoning: true }
     : model.startsWith('qwen/') ? { reasoning_format: 'parsed' } : {};
   const maxTokens = req.maxOutputTokens;
@@ -479,6 +487,14 @@ export function explainError(e: unknown): string {
   if (/^Pollinations /.test(msg)) {
     if (/Pollinations (429|402)/.test(msg)) return 'The free model allows about one reply every 30 seconds without a key, and it is still busy. Try again in a minute, add a free Pollinations token (enter.pollinations.ai) or a free Groq key in Settings.';
     if (/Pollinations 5\d\d/.test(msg)) return 'The free model service is down for a moment. Try again shortly, or switch to Gemini or Groq in Settings.';
+  }
+  if (/^FreeLLMAPI /.test(msg)) {
+    if (/FreeLLMAPI 401/.test(msg)) return 'FreeLLMAPI rejected the key. Copy the unified key from its dashboard into Settings → AI.';
+    if (/no_providers_configured|no.*provider/i.test(msg)) return 'FreeLLMAPI has no working provider for this model. Add a free key in its dashboard, or pick Auto.';
+    if (/FreeLLMAPI 429/.test(msg)) return 'Every FreeLLMAPI provider for this model is rate limited right now. Wait a moment or pick Auto.';
+  }
+  if (/Failed to fetch|NetworkError|Load failed/i.test(msg) && useSettings.getState().provider === 'freellmapi') {
+    return `Can't reach FreeLLMAPI at ${useSettings.getState().freellmapiUrl}. Make sure it is running (the ia menu starts it) and that its .env has DASHBOARD_ORIGINS=${location.origin}.`;
   }
   if (/^Groq /.test(msg)) {
     if (/Groq 401|invalid.api.key/i.test(msg)) return 'That Groq API key was rejected. Check it in Settings.';

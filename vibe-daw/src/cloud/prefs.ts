@@ -14,8 +14,9 @@ export const PREF_SECTIONS: PrefSection[] = ['ai', 'appearance', 'keymap'];
 export interface StampedPref { data: string; updatedAt: number }
 export type PrefsDoc = Partial<Record<PrefSection, StampedPref>>;
 
-type DeviceOnly = 'latency';
-const DEVICE_ONLY: DeviceOnly[] = ['latency'];
+// FreeLLMAPI runs on each device (its own address and key), so those never sync.
+type DeviceOnly = 'latency' | 'freellmapiUrl' | 'freellmapiKey';
+const DEVICE_ONLY: DeviceOnly[] = ['latency', 'freellmapiUrl', 'freellmapiKey'];
 
 /** Current local value of each section, as stable JSON. */
 export function readSections(): Record<PrefSection, string> {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Trash, Plus, Copy, Cloud, LogOut, RotateCcw } from '../icons';
-import { useSettings, MODELS, MAX_CUSTOM_INSTRUCTIONS, type Thinking, GROQ_MODELS } from '../../state/settings';
+import { useSettings, MODELS, MAX_CUSTOM_INSTRUCTIONS, type Thinking, GROQ_MODELS, FREELLMAPI_MODELS, DEFAULT_FREELLMAPI_URL } from '../../state/settings';
+import { useGatewayModels } from '../useGatewayModels';
 import { firebaseConfigured, hostedAiEnabled } from '../../cloud/config';
 import { useAuth, signIn, signOut, deleteAccount } from '../../cloud/cloud';
 import {NativeHapticsControl} from './NativeHapticsControl';
@@ -64,8 +65,14 @@ function AiSettings() {
   const [aiConsent, setAiConsent] = useState(hasAiConsent);
   const groq = s.provider === 'groq';
   const free = s.provider === 'free';
-  const notGemini = groq || free;
+  const gateway = s.provider === 'freellmapi';
+  const notGemini = groq || free || gateway;
   const [freeKey, setFreeKey] = useState(s.freeKey);
+  const [gwUrl, setGwUrl] = useState(s.freellmapiUrl);
+  const [gwKey, setGwKey] = useState(s.freellmapiKey);
+  const [gwModel, setGwModel] = useState(s.freellmapiModel);
+  useEffect(() => { setGwModel(s.freellmapiModel); }, [s.freellmapiModel]);
+  const gwList = useGatewayModels(gateway);
   // Pick up a key that arrives from another signed-in device while Settings is open.
   useEffect(() => { setKey(s.apiKey); }, [s.apiKey]);
   useEffect(() => { setGroqKey(s.groqKey); setGroqModel(s.groqModel); }, [s.groqKey, s.groqModel]);
@@ -73,7 +80,7 @@ function AiSettings() {
     <>
       <div className="field">
         <span>AI provider</span>
-        <div className="radio-cards three">
+        <div className="radio-cards four">
           <button className={`radio-card ${!notGemini ? 'on' : ''}`} onClick={() => s.set({ provider: 'gemini' })}>
             <b>Gemini</b>
             <span>Google. Hears your mix and samples.</span>
@@ -86,6 +93,10 @@ function AiSettings() {
             <b>Free</b>
             <span>No key at all (Pollinations). Slower; cannot listen.</span>
           </button>
+          <button className={`radio-card ${gateway ? 'on' : ''}`} onClick={() => s.set({ provider: 'freellmapi' })}>
+            <b>FreeLLMAPI</b>
+            <span>Your own gateway of free models. Cannot listen.</span>
+          </button>
         </div>
       </div>
       {free && (
@@ -94,6 +105,34 @@ function AiSettings() {
           <input type="password" value={freeKey} onChange={(e) => setFreeKey(e.target.value)} onBlur={() => s.set({ freeKey: freeKey.trim() })} placeholder="Leave empty to use it anonymously" autoComplete="off" spellCheck={false} />
           <small>Works without one. Without one it answers about once every 30 seconds; a free token from <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">enter.pollinations.ai</a> removes the wait. Voice messages are not sent to this model.</small>
         </label>
+      )}
+      {gateway && (
+        <>
+          <label className="field">
+            <span>FreeLLMAPI address</span>
+            <input value={gwUrl} onChange={(e) => setGwUrl(e.target.value)} onBlur={() => s.set({ freellmapiUrl: gwUrl.trim() || DEFAULT_FREELLMAPI_URL })} placeholder={DEFAULT_FREELLMAPI_URL} autoComplete="off" spellCheck={false} />
+            <small>Where your FreeLLMAPI server answers, ending in /v1. On this phone it is {DEFAULT_FREELLMAPI_URL}. Its .env needs <code>DASHBOARD_ORIGINS={location.origin}</code> so this page may call it.</small>
+          </label>
+          <label className="field">
+            <span>FreeLLMAPI key</span>
+            <input type="password" value={gwKey} onChange={(e) => setGwKey(e.target.value)} onBlur={() => s.set({ freellmapiKey: gwKey.trim() })} placeholder="freellmapi-…" autoComplete="off" spellCheck={false} />
+            <small>The unified key from your FreeLLMAPI dashboard. Saved only in this browser (not synced) and sent only to that server.</small>
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <input list="gateway-models" value={gwModel} onChange={(e) => setGwModel(e.target.value)} onBlur={() => s.set({ freellmapiModel: gwModel.trim() })} autoComplete="off" spellCheck={false} />
+            <datalist id="gateway-models">
+              {FREELLMAPI_MODELS.map((m) => <option key={m.id} value={m.id}>{m.name} - {m.blurb}</option>)}
+              {gwList.models.filter((m) => m.available && !FREELLMAPI_MODELS.some((f) => f.id === m.id)).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </datalist>
+            <small>
+              {gwList.state === 'loading' && 'Asking your server for its models…'}
+              {gwList.state === 'ok' && `Connected: ${gwList.models.filter((m) => m.available).length} models ready of ${gwList.models.length}. Auto lets the gateway choose. Voice messages are transcribed by the gateway.`}
+              {gwList.state === 'error' && `Can't reach FreeLLMAPI (${gwList.error === 'FreeLLMAPI 401' ? 'key rejected' : gwList.error}). Check that it is running, the address, the key and DASHBOARD_ORIGINS.`}
+              {gwList.state === 'idle' && 'Add the key to list your models.'}
+            </small>
+          </label>
+        </>
       )}
       {groq && (
         <>
