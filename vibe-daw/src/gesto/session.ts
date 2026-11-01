@@ -61,8 +61,6 @@ interface GestoState {
   captured: number;
   /** The band is placing notes right now (needs the song playing). */
   bandLive: boolean;
-  /** True when the video is blurred for privacy; the hand tracker still runs. */
-  privacy: boolean;
   setSettings: (patch: Partial<GestoSettings>) => void;
 }
 
@@ -115,8 +113,6 @@ export const useGesto = create<GestoState>((set, get) => ({
   recording: false,
   captured: 0,
   bandLive: false,
-  /** True when the video is blurred for privacy; the hand tracker still runs. */
-  privacy: false,
   setSettings: (patch) => {
     const before = get().settings;
     const settings = { ...before, ...patch };
@@ -124,6 +120,7 @@ export const useGesto = create<GestoState>((set, get) => ({
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* storage disabled */ }
     // A new voicing rule applies at once to whatever is held.
     current = null;
+    if ('privacy' in patch) applyPrivacy();
     if (patch.groove && patch.groove !== before.groove) applyGrooveKit();
     if ('bassPreset' in patch || (patch.groove && !settings.bassPreset)) applyBassSound();
     // New sounds need their monitor voices loaded before the band places more notes.
@@ -251,9 +248,13 @@ export function cameraVideo(): HTMLVideoElement {
     video.autoplay = true;
     video.setAttribute('playsinline', '');
   }
-  const p = useGesto.getState().privacy;
-  video.style.filter = p ? 'blur(38px) brightness(0.6)' : '';
+  applyPrivacy();
   return video;
+}
+
+/** Blur the feed (not the tracker's input) when the privacy setting is on. */
+function applyPrivacy() {
+  if (video) video.style.filter = useGesto.getState().settings.privacy ? 'blur(38px) brightness(0.6)' : '';
 }
 
 function stopArp() {
@@ -345,8 +346,6 @@ export async function startCamera() {
     const v = cameraVideo();
     v.srcObject = stream;
     await v.play().catch(() => undefined);
-        // Ensure video is visible even if CSS failed to apply the live class.
-        v.style.display = 'block';
     await tracking;
     if (useGesto.getState().input !== 'camera') return;
     camera.reset();
