@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Trash, Plus, Copy, Cloud, LogOut, RotateCcw } from '../icons';
-import { useSettings, MODELS, MAX_CUSTOM_INSTRUCTIONS, type Thinking, GROQ_MODELS, FREELLMAPI_MODELS, DEFAULT_FREELLMAPI_URL } from '../../state/settings';
-import { useGatewayModels } from '../useGatewayModels';
+import { useSettings, MODELS, MAX_CUSTOM_INSTRUCTIONS, type Thinking, GROQ_MODELS, FREELLMAPI_MODELS, DEFAULT_FREELLMAPI_URL, KILO_MODELS } from '../../state/settings';
+import { useGatewayModels, useKiloModels } from '../useGatewayModels';
 import { firebaseConfigured, hostedAiEnabled } from '../../cloud/config';
 import { useAuth, signIn, signOut, deleteAccount } from '../../cloud/cloud';
 import {NativeHapticsControl} from './NativeHapticsControl';
@@ -66,7 +66,11 @@ function AiSettings() {
   const groq = s.provider === 'groq';
   const free = s.provider === 'free';
   const gateway = s.provider === 'freellmapi';
-  const notGemini = groq || free || gateway;
+  const kilo = s.provider === 'kilo';
+  const notGemini = groq || free || gateway || kilo;
+  const [kiloModel, setKiloModel] = useState(s.kiloModel);
+  useEffect(() => { setKiloModel(s.kiloModel); }, [s.kiloModel]);
+  const kiloList = useKiloModels(kilo);
   const [freeKey, setFreeKey] = useState(s.freeKey);
   const [gwUrl, setGwUrl] = useState(s.freellmapiUrl);
   const [gwKey, setGwKey] = useState(s.freellmapiKey);
@@ -97,6 +101,10 @@ function AiSettings() {
             <b>FreeLLMAPI</b>
             <span>Your own gateway of free models. Cannot listen.</span>
           </button>
+          <button className={`radio-card ${kilo ? 'on' : ''}`} onClick={() => s.set({ provider: 'kilo' })}>
+            <b>Kilo</b>
+            <span>Free models, no key. Cannot listen.</span>
+          </button>
         </div>
       </div>
       {free && (
@@ -104,6 +112,22 @@ function AiSettings() {
           <span>Pollinations token (optional)</span>
           <input type="password" value={freeKey} onChange={(e) => setFreeKey(e.target.value)} onBlur={() => s.set({ freeKey: freeKey.trim() })} placeholder="Leave empty to use it anonymously" autoComplete="off" spellCheck={false} />
           <small>Works without one. Without one it answers about once every 30 seconds; a free token from <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">enter.pollinations.ai</a> removes the wait. Voice messages are not sent to this model.</small>
+        </label>
+      )}
+      {kilo && (
+        <label className="field">
+          <span>Kilo model</span>
+          <input list="kilo-models" value={kiloModel} onChange={(e) => setKiloModel(e.target.value)} onBlur={() => s.set({ kiloModel: kiloModel.trim() })} autoComplete="off" spellCheck={false} />
+          <datalist id="kilo-models">
+            {KILO_MODELS.map((m) => <option key={m.id} value={m.id}>{m.name} - {m.blurb}</option>)}
+            {kiloList.models.filter((m) => !KILO_MODELS.some((k) => k.id === m.id)).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </datalist>
+          <small>
+            No key or sign-up: requests go through this site to Kilo's free models (about 200 replies an hour, shared). Only free models work here.
+            {kiloList.state === 'ok' && ` ${kiloList.models.length} free models with tool use right now.`}
+            {kiloList.state === 'error' && ` Couldn't list them (${kiloList.error}); Kilo Auto still works.`}
+            {' '}Voice messages are not sent to these models.
+          </small>
         </label>
       )}
       {gateway && (

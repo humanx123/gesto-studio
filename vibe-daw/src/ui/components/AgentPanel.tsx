@@ -5,8 +5,8 @@ import {
 } from '../icons';
 import { useAgent, runAgent, stopAgent, keepChanges, revertTo, type ChatItem } from '../../agent/agent';
 import { analyzeReference } from '../../agent/ears';
-import { useSettings, MODELS, GROQ_MODELS, FREE_MODELS, FREELLMAPI_MODELS, aiAvailable } from '../../state/settings';
-import { useGatewayModels } from '../useGatewayModels';
+import { useSettings, MODELS, GROQ_MODELS, FREE_MODELS, FREELLMAPI_MODELS, KILO_MODELS, aiAvailable } from '../../state/settings';
+import { useGatewayModels, useKiloModels } from '../useGatewayModels';
 import { useDaw } from '../../state/store';
 import { Markdown } from '../Markdown';
 import { Dropdown } from './Dropdown';
@@ -140,7 +140,11 @@ export function AgentPanel({ open, focusSignal, onClose }: { open: boolean; focu
   const gwModel = useSettings((s) => s.freellmapiModel);
   const gwKey = useSettings((s) => s.freellmapiKey);
   const gwList = useGatewayModels(!!gwKey.trim());
-  const modelLabel = provider === 'freellmapi' ? FREELLMAPI_MODELS.find((m) => m.id === gwModel)?.name ?? gwList.models.find((m) => m.id === gwModel)?.name ?? gwModel
+  const kiloModel = useSettings((s) => s.kiloModel);
+  // Free and keyless, so the list is always worth having (the relay caches it for 10 minutes).
+  const kiloList = useKiloModels(true);
+  const modelLabel = provider === 'kilo' ? KILO_MODELS.find((m) => m.id === kiloModel)?.name ?? kiloList.models.find((m) => m.id === kiloModel)?.name ?? kiloModel
+    : provider === 'freellmapi' ? FREELLMAPI_MODELS.find((m) => m.id === gwModel)?.name ?? gwList.models.find((m) => m.id === gwModel)?.name ?? gwModel
     : provider === 'groq' ? GROQ_MODELS.find((m) => m.id === groqModel)?.name ?? groqModel
     : provider === 'free' ? FREE_MODELS.find((m) => m.id === freeModel)?.name ?? freeModel
     : MODELS.find((m) => m.id === model)?.name;
@@ -380,6 +384,12 @@ export function AgentPanel({ open, focusSignal, onClose }: { open: boolean; focu
               {[...FREELLMAPI_MODELS, ...gwList.models.filter((m) => m.available && !FREELLMAPI_MODELS.some((f) => f.id === m.id)).slice(0, 12).map((m) => ({ id: m.id, name: m.name, blurb: m.id }))].map((m) => {
                 const on = provider === 'freellmapi' && gwModel === m.id;
                 return <button key={`gw-${m.id}`} className="menu-item" role="option" aria-selected={on} onClick={() => { useSettings.getState().set({ provider: 'freellmapi', freellmapiModel: m.id }); close(); }}><b>{m.name}{on && <Check size={13} />}</b><span>{m.blurb}</span></button>;
+              })}
+              <div className="menu-divider" />
+              <div className="menu-heading">Kilo · free, no key</div>
+              {[...KILO_MODELS, ...kiloList.models.filter((m) => !KILO_MODELS.some((k) => k.id === m.id)).slice(0, 12).map((m) => ({ id: m.id, name: m.name, blurb: m.id }))].map((m) => {
+                const on = provider === 'kilo' && kiloModel === m.id;
+                return <button key={`kilo-${m.id}`} className="menu-item" role="option" aria-selected={on} onClick={() => { useSettings.getState().set({ provider: 'kilo', kiloModel: m.id }); close(); }}><b>{m.name}{on && <Check size={13} />}</b><span>{m.blurb}</span></button>;
               })}
             </>}>{modelLabel}</Dropdown>
             <div className="spacer" />

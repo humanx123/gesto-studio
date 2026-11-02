@@ -16,6 +16,7 @@
         android:roundIcon="@mipmap/icono"
         android:hardwareAccelerated="true"
         android:allowBackup="false"
+        android:networkSecurityConfig="@xml/red"
         android:supportsRtl="true">
         <activity
             android:name=".MainActivity"

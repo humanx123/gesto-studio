@@ -39,7 +39,17 @@ export const FREELLMAPI_MODELS = [
 ] as const;
 export const DEFAULT_FREELLMAPI_MODEL = FREELLMAPI_MODELS[0].id;
 
-export type Provider = 'gemini' | 'groq' | 'free' | 'freellmapi';
+// Kilo's gateway serves free models without a key. It sends no CORS headers, so the site's
+// own Worker relays it at /api/kilo (worker/index.js, free routes only).
+export const KILO_URL = '/api/kilo/v1';
+export const KILO_MODELS = [
+  { id: 'kilo-auto/free', name: 'Kilo Auto (free)', blurb: 'No key. Kilo picks a free model that is up. About 200 replies an hour.' },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra (free)', blurb: 'Large and careful. No key.' },
+  { id: 'reflection/beam-free', name: 'Beam 1.0 (free)', blurb: 'Quick tool use. No key.' },
+] as const;
+export const DEFAULT_KILO_MODEL = KILO_MODELS[0].id;
+
+export type Provider = 'gemini' | 'groq' | 'free' | 'freellmapi' | 'kilo';
 export type Connection = 'firebase' | 'apikey';
 export type Thinking = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type ListeningQuality = 'full' | 'balanced' | 'compact';
@@ -60,6 +70,7 @@ interface SettingsState {
   freellmapiUrl: string;
   freellmapiKey: string;
   freellmapiModel: string;
+  kiloModel: string;
   thinking: Thinking;
   /** Let the agent bounce and listen to its own work without asking. */
   autoListen: boolean;
@@ -94,7 +105,7 @@ export type SettingsValues = Omit<SettingsState, 'set'>;
 /** Fill defaults and drop invalid values, for localStorage and for settings synced from another device. */
 export function sanitizeSettings(saved: Partial<Record<keyof SettingsValues, unknown>>): SettingsValues {
   return {
-    provider: saved.provider === 'groq' || saved.provider === 'free' || saved.provider === 'freellmapi' ? saved.provider : 'gemini',
+    provider: saved.provider === 'groq' || saved.provider === 'free' || saved.provider === 'freellmapi' || saved.provider === 'kilo' ? saved.provider : 'gemini',
     model: MODELS.some((m) => m.id === saved.model) ? (saved.model as ModelId) : 'gemini-3.8-flash',
     connection: hostedAiEnabled ? (saved.connection === 'apikey' ? 'apikey' : 'firebase') : 'apikey',
     apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : '',
@@ -105,6 +116,7 @@ export function sanitizeSettings(saved: Partial<Record<keyof SettingsValues, unk
     freellmapiUrl: typeof saved.freellmapiUrl === 'string' && /^https?:\/\//.test(saved.freellmapiUrl.trim()) ? saved.freellmapiUrl.trim().replace(/\/+$/, '') : DEFAULT_FREELLMAPI_URL,
     freellmapiKey: typeof saved.freellmapiKey === 'string' ? saved.freellmapiKey : '',
     freellmapiModel: typeof saved.freellmapiModel === 'string' && saved.freellmapiModel.trim() ? saved.freellmapiModel.trim() : DEFAULT_FREELLMAPI_MODEL,
+    kiloModel: typeof saved.kiloModel === 'string' && saved.kiloModel.trim() ? saved.kiloModel.trim() : DEFAULT_KILO_MODEL,
     thinking: THINKING.includes(saved.thinking as Thinking) ? (saved.thinking as Thinking) : 'MEDIUM',
     autoListen: typeof saved.autoListen === 'boolean' ? saved.autoListen : true,
     customInstructions: typeof saved.customInstructions === 'string' ? saved.customInstructions.slice(0, MAX_CUSTOM_INSTRUCTIONS) : '',
@@ -135,7 +147,7 @@ export function effectiveApiKey(): string {
 export function aiAvailable(): { ok: boolean; reason?: string } {
   if (!hasAiConsent()) return { ok: false, reason: 'Review the AI terms and data notice in Settings before using the agent.' };
   const s = useSettings.getState();
-  if (s.provider === 'free') return { ok: true };
+  if (s.provider === 'free' || s.provider === 'kilo') return { ok: true };
   if (s.provider === 'freellmapi') {
     return s.freellmapiKey.trim() ? { ok: true } : { ok: false, reason: 'Add your FreeLLMAPI key in Settings to use the agent.' };
   }
@@ -150,7 +162,7 @@ export function aiAvailable(): { ok: boolean; reason?: string } {
 
 export interface GatewayModel { id: string; name: string; available: boolean }
 
-/** The models a FreeLLMAPI server offers, available ones first. Throws when it can't be reached. */
+/** The models an OpenAI-style gateway (FreeLLMAPI, Kilo) offers, available ones first. Throws when it can't be reached. */
 export async function fetchFreellmapiModels(url: string, key: string, signal?: AbortSignal): Promise<GatewayModel[]> {
   const res = await fetch(`${url.replace(/\/+$/, '')}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal });
   if (!res.ok) throw new Error(`FreeLLMAPI ${res.status}`);

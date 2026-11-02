@@ -1,4 +1,4 @@
-import { useSettings, effectiveApiKey, type Thinking } from '../state/settings';
+import { useSettings, effectiveApiKey, KILO_URL, type Thinking } from '../state/settings';
 import { getFirebaseApp } from '../cloud/firebase';
 import { hasAiConsent } from '../legal/acceptance';
 
@@ -180,7 +180,7 @@ const WHISPER_MODEL = 'whisper-large-v3-turbo';
 
 interface CompatHost {
   /** Starts every error ("Groq 429: …") so explainError can tell hosts apart. */
-  name: 'Groq' | 'Pollinations' | 'FreeLLMAPI';
+  name: 'Groq' | 'Pollinations' | 'FreeLLMAPI' | 'Kilo';
   chatUrl: string;
   /** Empty for the free host without a token. */
   key: string;
@@ -192,6 +192,7 @@ interface CompatHost {
 function compatHost(): CompatHost {
   const s = useSettings.getState();
   if (s.provider === 'free') return { name: 'Pollinations', chatUrl: FREE_CHAT, key: s.freeKey.trim(), model: s.freeModel, transcribeUrl: null };
+  if (s.provider === 'kilo') return { name: 'Kilo', chatUrl: `${KILO_URL}/chat/completions`, key: '', model: s.kiloModel, transcribeUrl: null };
   if (s.provider === 'freellmapi') {
     const key = s.freellmapiKey.trim();
     if (!key) throw new Error('No FreeLLMAPI key. Add it in Settings.');
@@ -277,7 +278,7 @@ async function toGroqMessages(req: LlmRequest, host: CompatHost): Promise<GroqMe
       } else if (p.inlineData?.mimeType.startsWith('audio/')) {
         texts.push(host.transcribeUrl
           ? `[Voice message, transcribed] ${await transcribe(p.inlineData, host, req.signal)}`
-          : '(A voice message was left out: this free model cannot hear audio. Ask the user to type the request.)');
+          : `(A voice message was left out: the ${host.name} model cannot hear audio. Ask the user to type the request.)`);
       } else if (p.inlineData) {
         texts.push(`(An attachment was left out: the ${host.name} model in use cannot see it.)`);
       } else if (p.text && !p.thought) {
@@ -352,7 +353,7 @@ async function streamCompat(req: LlmRequest, h: StreamHandlers): Promise<LlmResu
   // The free host cuts every reply at 1500 tokens whatever max_tokens says, and GPT-OSS can spend
   // all of them reasoning before it acts. Low effort leaves room for the tool calls.
   // FreeLLMAPI routes to many providers; extra reasoning fields make some of them answer 400.
-  const reasoning = host.name === 'FreeLLMAPI' ? {}
+  const reasoning = host.name === 'FreeLLMAPI' || host.name === 'Kilo' ? {}
     : host.name !== 'Groq' ? { reasoning_effort: 'low' }
     : model.startsWith('openai/gpt-oss') ? { reasoning_effort: GROQ_EFFORT[req.thinking ?? 'MEDIUM'], include_reasoning: true }
     : model.startsWith('qwen/') ? { reasoning_format: 'parsed' } : {};
@@ -487,6 +488,10 @@ export function explainError(e: unknown): string {
   if (/^Pollinations /.test(msg)) {
     if (/Pollinations (429|402)/.test(msg)) return 'The free model allows about one reply every 30 seconds without a key, and it is still busy. Try again in a minute, add a free Pollinations token (enter.pollinations.ai) or a free Groq key in Settings.';
     if (/Pollinations 5\d\d/.test(msg)) return 'The free model service is down for a moment. Try again shortly, or switch to Gemini or Groq in Settings.';
+  }
+  if (/^Kilo /.test(msg)) {
+    if (/Kilo 429/.test(msg)) return 'Kilo\u2019s free models allow about 200 replies an hour and that is used up for now. Wait a bit, or switch to another free model or provider.';
+    if (/Kilo 5\d\d/.test(msg)) return 'Kilo\u2019s free model is busy or down. Try Kilo Auto or another model.';
   }
   if (/^FreeLLMAPI /.test(msg)) {
     if (/FreeLLMAPI 401/.test(msg)) return 'FreeLLMAPI rejected the key. Copy the unified key from its dashboard into Settings → AI.';

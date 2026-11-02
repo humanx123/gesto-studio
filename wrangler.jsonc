@@ -1,12 +1,16 @@
 {
-  // Gesto Studio on Cloudflare (static assets only: no Worker code, so requests stay free).
+  // Gesto Studio on Cloudflare: static assets, plus worker/index.js for /api/* only (the Kilo
+  // free-model proxy), so ordinary page and file requests never run Worker code.
   // Build first with scripts/build.sh; deploy with scripts/deploy.sh.
   "$schema": "https://unpkg.com/wrangler@4.145.0/config-schema.json",
   "name": "gesto-studio",
+  "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "html_handling": "auto-trailing-slash",
-    "not_found_handling": "none"
+    "not_found_handling": "none",
+    "run_worker_first": ["/api/*"]
   }
 }

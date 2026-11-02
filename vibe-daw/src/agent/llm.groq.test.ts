@@ -215,3 +215,17 @@ describe('FreeLLMAPI transport', () => {
     expect(explainError(new Error('FreeLLMAPI 401: bad key'))).toMatch(/rejected the key/);
   });
 });
+
+describe('Kilo transport', () => {
+  it('goes through the site relay with no key and the chosen free model', async () => {
+    useSettings.getState().set({ provider: 'kilo', kiloModel: 'kilo-auto/free' });
+    fetchMock.mockResolvedValueOnce(sse([{ choices: [{ delta: { reasoning: 'hm' } }] }, { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'set_tempo', arguments: '{"bpm":92}' } }] }, finish_reason: 'tool_calls' }] }]));
+    const res = await streamGenerate({ contents: [{ role: 'user', parts: [{ text: 'tempo 92' }] }], tools: [{ name: 'set_tempo', description: 'Tempo' }] });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/kilo/v1/chat/completions');
+    expect(init.headers.Authorization).toBeUndefined();
+    expect(JSON.parse(init.body)).toMatchObject({ model: 'kilo-auto/free' });
+    expect(res.content.parts.find((p) => p.functionCall)?.functionCall).toMatchObject({ name: 'set_tempo', args: { bpm: 92 } });
+    expect(explainError(new Error('Kilo 429: rate'))).toMatch(/200 replies an hour/);
+  });
+});
