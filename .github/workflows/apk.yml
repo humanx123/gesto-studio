@@ -91,16 +91,22 @@ jobs:
         run: ./gradlew assembleRelease -PfirmaLocal --no-daemon --stacktrace
 
       # An unsigned APK is useless; catch it here rather than at install time.
+      # NOT by looking for META-INF/*.RSA: with minSdk 24 AGP skips the old v1
+      # jar signing entirely and signs with APK Signature Scheme v2, whose
+      # signature lives in the APK Signing Block, not in META-INF. Checking
+      # META-INF failed a perfectly valid APK. apksigner is the real authority.
       - name: Check it is signed
         run: |
           set -euo pipefail
           apk=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          if ! unzip -l "$apk" | grep -qE 'META-INF/.*\.(RSA|DSA|EC)$'; then
-            echo "The APK carries no signature, so Android would refuse to install it." >&2
-            unzip -l "$apk" >&2
-            exit 1
+          apksigner=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner | sort -V | tail -1)
+          if [ -n "$apksigner" ]; then
+            "$apksigner" verify --verbose --print-certs "$apk"
+          else
+            grep -qa 'APK Sig Block 42' "$apk" \
+              || { echo "The APK carries no signing block, so Android would refuse it." >&2; exit 1; }
+            echo "Signing block present (apksigner not on this runner)."
           fi
-          echo "Signed."
 
       - name: Name the artifact after the version
         id: apk
