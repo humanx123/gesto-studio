@@ -244,7 +244,7 @@ describe('Gesto live band', () => {
     // Four snares in a row on consecutive 16ths right after the flick.
     const after = (api.scheduleLive.mock.calls.slice(before) as unknown as Array<[string, number, number]>).filter((c) => c[0] === drums.id);
     const snareBeats = after.filter(([, , n]) => n === 38).map(([, b]) => b).sort((a, b) => a - b);
-    const run = snareBeats.findIndex((b, i) => [1, 2, 3].every((k) => snareBeats.some((x) => Math.abs(x - (b + k * 0.25)) < 1e-6)));
+    const run = snareBeats.findIndex((b) => [1, 2, 3].every((k) => snareBeats.some((x) => Math.abs(x - (b + k * 0.25)) < 1e-6)));
     expect(run).toBeGreaterThanOrEqual(0);
     expect(after.some(([, , n]) => n === 49)).toBe(true);
     // The bass plays the chord's root (C) on the generated beat, and everything played was recorded.
