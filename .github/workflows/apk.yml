@@ -45,12 +45,62 @@ jobs:
           key: gradle-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
+      # An unsigned release APK cannot be installed at all, and build.gradle's
+      # `-PfirmaLocal` points at signingConfigs.debug — which needs a debug
+      # keystore that a fresh runner does not have (it is normally created by a
+      # debug build on a developer machine). Without this the APK came out with
+      # no META-INF signature and Android refused it.
+      #
+      # With an ANDROID_KEYSTORE_BASE64 secret the APK is signed with YOUR key,
+      # so each build installs as an upgrade over the last. Without it, a
+      # throwaway key is generated per run: the APK installs, but only as a
+      # fresh install (Android rejects an upgrade signed by a different key).
+      - name: Prepare the signing key
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.android
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks"
+              echo "RELEASE_STORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "RELEASE_KEY_ALIAS=$KEY_ALIAS"
+              echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+            echo "Signing with the configured release key."
+          else
+            # The exact coordinates the Android debug keystore always uses.
+            keytool -genkeypair -v -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" >/dev/null
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret: signing with a throwaway debug key. The APK installs, but not as an upgrade over an APK signed with a different key."
+          fi
+
       # The shell is a WebView over the deployed site, so it needs no web build.
-      # Unsigned unless a keystore is configured: an unsigned release APK cannot
-      # be installed, so fall back to the debug signing config, which can.
       - name: Build
         working-directory: android
         run: ./gradlew assembleRelease -PfirmaLocal --no-daemon --stacktrace
+
+      # An unsigned APK is useless; catch it here rather than at install time.
+      - name: Check it is signed
+        run: |
+          set -euo pipefail
+          apk=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          if ! unzip -l "$apk" | grep -qE 'META-INF/.*\.(RSA|DSA|EC)$'; then
+            echo "The APK carries no signature, so Android would refuse to install it." >&2
+            unzip -l "$apk" >&2
+            exit 1
+          fi
+          echo "Signed."
 
       - name: Name the artifact after the version
         id: apk
@@ -78,3 +128,6 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --notes "Gesto Studio $TAG"
           gh release upload "$TAG" gesto-studio.apk --clobber
+          if [ "${{ steps.signing.outputs.stable }}" != "true" ]; then
+            echo "Note: signed with a throwaway key — uninstall any previous build before installing."
+          fi
