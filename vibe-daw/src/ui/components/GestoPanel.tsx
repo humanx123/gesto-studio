@@ -7,7 +7,7 @@ import { formatPosition } from '../../model/project';
 import { useDaw, useTransport } from '../../state/store';
 import { useAgent } from '../../agent/agent';
 import {
-  cameraVideo, isPlayable, latestFrame, newGestoTrack, setPreset, setTrack, startCamera, startKeyboard,
+  cameraVideo, isPlayable, latestFrame, newGestoTrack, setPreset, setTrack, startCamera, startKeyboard, startMidi,
   startRecording, stopInput, stopRecording, toggleJam, useGesto,
 } from '../../gesto/session';
 import { BASS_STYLES, GROOVES, type BassStyle, type Groove } from '../../gesto/band';
@@ -75,6 +75,7 @@ function Stage() {
       {input !== 'camera' && (
         <div className="gesto-stage-empty">
           {input === 'keyboard' ? <><Piano size={22} /><span>Keyboard on: 1–7 play degrees I–VII, [ ] minor/major, 8 9 0 - chord style, Shift octave down.</span></>
+          : input === 'midi' ? <><Piano size={22} /><span>MIDI controller connected. Keys play chords, knobs control expression.</span></>
             : <span>Play pads with your hands. Left hand picks the chord, right hand the style, loudness and octave.</span>}
         </div>
       )}
@@ -288,6 +289,7 @@ export function GestoPanel({ hidden }: { hidden: boolean }) {
       <div className="gesto-inputs" role="radiogroup" aria-label="Gesto input">
         <button className={`btn ${input === 'camera' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'camera'} onClick={() => void startCamera()}>Camera</button>
         <button className={`btn ${input === 'keyboard' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'keyboard'} onClick={startKeyboard}>Keyboard</button>
+        <button className={`btn ${input === 'midi' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'midi'} onClick={startMidi}>MIDI</button>
         <button className={`btn ${input === 'off' ? 'solid' : ''}`} role="radio" aria-checked={input === 'off'} onClick={stopInput}>Off</button>
       </div>
       {error && <div className="err gesto-err"><CircleAlert size={14} /> {error}</div>}

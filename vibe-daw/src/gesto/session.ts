@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { ChordReader, type HarmonyMode, type StyleMode } from '@gesto/chordReader';
 import { CameraSource } from '@gesto/input/cameraSource';
 import { KeyboardSource } from '@gesto/input/keyboardSource';
+import { MidiSource } from '@gesto/input/midiSource';
 import { loadKeymap } from '@gesto/input/keymap';
 import type { HandFrame } from '@gesto/input/types';
 import {
@@ -45,7 +46,7 @@ export interface GestoSettings {
   reactive: boolean;
 }
 
-export type GestoInput = 'off' | 'camera' | 'keyboard';
+export type GestoInput = 'off' | 'camera' | 'keyboard' | 'midi';
 export type GestoPart = 'pads' | 'bass' | 'drums';
 
 interface GestoState {
@@ -232,6 +233,7 @@ function applyBassSound() {
 const reader = new ChordReader();
 const camera = new CameraSource();
 const keyboard = new KeyboardSource();
+const midi = new MidiSource();
 let stream: MediaStream | null = null;
 let video: HTMLVideoElement | null = null;
 let raf = 0;
@@ -360,6 +362,7 @@ function loop() {
   const { input } = useGesto.getState();
   if (input === 'camera' && video && video.readyState >= 2) onFrame(camera.getFrame(video, performance.now()));
   else if (input === 'keyboard') onFrame(keyboard.getFrame());
+  else if (input === 'midi') onFrame(midi.getFrame());
   raf = requestAnimationFrame(loop);
 }
 
@@ -421,6 +424,26 @@ export function startKeyboard() {
   void syncBand();
 }
 
+export function startMidi() {
+  if (useGesto.getState().input === 'midi') return;
+  stopInput();
+  ensureTrack();
+  // Request MIDI access
+  midi.requestAccess().then((inputs) => {
+    if (inputs.length > 0) {
+      midi.selectInput(inputs[0].id);
+      useGesto.setState({ input: 'midi', status: 'ready', error: null });
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(loop);
+      void syncBand();
+    } else {
+      useGesto.setState({ input: 'off', status: 'error', error: 'No MIDI input devices found. Connect your controller and try again.' });
+    }
+  }).catch((e) => {
+    useGesto.setState({ input: 'off', status: 'error', error: `MIDI access failed: ${(e as Error).message ?? e}` });
+  });
+}
+
 export function stopInput() {
   if (useGesto.getState().recording) stopRecording();
   cancelAnimationFrame(raf);
@@ -429,6 +452,7 @@ export function stopInput() {
   if (video) video.srcObject = null;
   window.removeEventListener('keydown', keyDown, true);
   window.removeEventListener('keyup', keyUp, true);
+  midi.reset();
   lastFrame = null;
   resetFeel();
   release();

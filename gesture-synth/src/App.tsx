@@ -7,8 +7,10 @@ import { audioEngine } from './audioEngine';
 import { noteChord } from './bridge';
 import { CameraSource } from './input/cameraSource';
 import { KeyboardSource } from './input/keyboardSource';
+import { MidiSource, type MidiMessageSpec } from './input/midiSource';
 import type { HandFrame } from './input/types';
 import { DEFAULT_KEYMAP, displayKey, loadKeymap, saveKeymap, type KbAction } from './input/keymap';
+import { DEFAULT_MIDI_MAP, loadMidiMap, saveMidiMap, type MidiAction, type MidiMap, MIDI_ACTION_ORDER, MIDI_ACTION_META, matchingMidiPresetId, displayMidiMessage, type MidiKeymapPreset } from './input/midiKeymap';
 import { KbGuide } from './components/KbGuide';
 import { SettingsPanel } from './components/SettingsPanel';
 import { HelpModal } from './components/HelpModal';
@@ -174,6 +176,9 @@ export default function App() {
   // Keyboard input source (no-camera mode).
   const keyboardSourceRef = useRef<KeyboardSource | null>(null);
   if (!keyboardSourceRef.current) keyboardSourceRef.current = new KeyboardSource();
+  // MIDI input source (controller mode).
+  const midiSourceRef = useRef<MidiSource | null>(null);
+  if (!midiSourceRef.current) midiSourceRef.current = new MidiSource();
 
   const [showMobilePanel, setShowMobilePanel] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -332,6 +337,25 @@ export default function App() {
   useEffect(() => {
     keyboardSourceRef.current?.setKeymap(keymap);
   }, [keymap]);
+  // MIDI mode (controller input) — similar lifecycle to keyboard mode.
+  const [midiMode, setMidiMode] = useState(() => {
+    try { return localStorage.getItem('gsw-midi-mode') === '1'; } catch { return false; }
+  });
+  const midiModeRef = useRef(midiMode);
+  useEffect(() => { midiModeRef.current = midiMode; }, [midiMode]);
+  // Player-customizable MIDI mappings — persisted so rebinds survive visits.
+  const [midiMap, setMidiMapState] = useState<MidiMap>(() => loadMidiMap());
+  const handleMidiMapChange = useCallback((map: MidiMap) => {
+    saveMidiMap(map);
+    setMidiMapState(map);
+  }, []);
+  useEffect(() => {
+    midiSourceRef.current?.selectInput(midiSourceRef.current.getSelectedInputId()); // re-apply mappings
+  }, [midiMap]);
+  // MIDI access request (async, done once when first entering MIDI mode)
+  const [midiInputs, setMidiInputs] = useState<MIDIInput[]>([]);
+  const [midiSelectedInputId, setMidiSelectedInputId] = useState<string | null>(null);
+  const [midiAccessRequested, setMidiAccessRequested] = useState(false);
   // Mirrored into a ref so the keydown/keyup effect (empty deps, see below)
   // always reads the current bindings without re-subscribing listeners.
   const mappedKeysRef = useRef<string[]>([...Object.values(DEFAULT_KEYMAP), ' ']);
@@ -1036,8 +1060,8 @@ export default function App() {
     if (!canvas) return;
     // The keyboard guide can run the keyboard pipeline while keyboard mode
     // itself is off (Help replay on the landing page) — bug 2026-08-09:
-    // guide keypresses were silent.
-    if (!keyboardModeRef.current && !showKbGuideRef.current && !video) return;
+    // guide keypresses were silent. MIDI mode similarly needs no camera.
+    if (!keyboardModeRef.current && !midiModeRef.current && !showKbGuideRef.current && !video) return;
 
     runningRef.current = true;
     lastDetectRef.current = 0;
@@ -1050,19 +1074,24 @@ export default function App() {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      // No-camera mode: synthetic hands + stage background (no video feed).
+      // No-camera modes: synthetic hands + stage background (no video feed).
       // Also used while the keyboard guide is open (its presses must sound).
-      if (keyboardModeRef.current || showKbGuideRef.current) {
+      if (keyboardModeRef.current || midiModeRef.current || showKbGuideRef.current) {
         if (canvas.width !== 640 || canvas.height !== 480) {
           canvas.width = 640;
           canvas.height = 480;
         }
         drawStageBackground(ctx, canvas.width, canvas.height);
         try {
-          const frame = keyboardSourceRef.current?.getFrame() ?? { left: null, right: null, source: 'keyboard' as const };
+          let frame: HandFrame;
+          if (midiModeRef.current) {
+            frame = midiSourceRef.current?.getFrame() ?? { left: null, right: null, source: 'midi' as const };
+          } else {
+            frame = keyboardSourceRef.current?.getFrame() ?? { left: null, right: null, source: 'keyboard' as const };
+          }
           processHandsRef.current?.(frame);
         } catch (e) {
-          console.warn('Keyboard frame error:', e);
+          console.warn('Synthetic frame error:', e);
         }
         drawOverlayRef.current?.(ctx, canvas.width, canvas.height);
         drawWaveformRef.current?.();
@@ -1605,6 +1634,59 @@ export default function App() {
     // (!on && !isRunning): just flips the mode on the landing — no start.
   }, [isRunning, startKeyboardMode, startCamera, stopCamera]);
 
+  // MIDI mode toggle — symmetric with keyboard mode.
+  const handleMidiToggle = useCallback(async (on: boolean, source: 'toolbar' | 'settings' = 'settings') => {
+    trackSettingChanged('midi_mode', on ? 'on' : 'off');
+    try { localStorage.setItem('gsw-midi-mode', on ? '1' : '0'); } catch { /* private mode */ }
+    setMidiMode(on);
+    if (on && !isRunning) {
+      // Start immediately when enabled from idle
+      await startMidiMode(source);
+    } else if (on && isRunning) {
+      // Camera/keyboard → MIDI: stop current pipeline cleanly first
+      stopCamera();
+      await startMidiMode(source);
+    } else if (!on && isRunning) {
+      // MIDI → camera: stop MIDI pipeline cleanly first, then start camera
+      stopMidi();
+      void startCamera();
+    }
+    // (!on && !isRunning): just flips the mode on the landing — no start.
+  }, [isRunning, stopCamera, startCamera]);
+
+  async function startMidiMode(source: 'toolbar' | 'settings' | 'main_button' = 'settings'): Promise<void> {
+    if (midiModeRef.current) return;
+    stopCamera();
+    // Request MIDI access if not already done
+    if (!midiAccessRequested) {
+      setMidiAccessRequested(true);
+      try {
+        const inputs = await midiSourceRef.current?.requestAccess();
+        if (inputs) setMidiInputs(inputs);
+      } catch (e) {
+        console.warn('MIDI access failed:', e);
+        setMidiMode(false);
+        return;
+      }
+    }
+    // Auto-select first input if none selected
+    if (!midiSelectedInputId && midiInputs.length > 0) {
+      const firstId = midiInputs[0].id;
+      setMidiSelectedInputId(firstId);
+      midiSourceRef.current?.selectInput(firstId);
+    }
+    midiSourceRef.current?.reset();
+    keyboardSourceRef.current?.reset();
+    setMidiMode(true);
+    // Start the animation loop (will be picked up by the rAF effect)
+    // The loop runs when isRunning becomes true, so we just need to ensure the mode is set
+  }
+
+  function stopMidi() {
+    midiSourceRef.current?.reset();
+    // Don't stop the audio engine here - let the caller decide
+  }
+
   // Keyboard session end on tab close/reload: visibilitychange fires
   // reliably on both, so the exit event's page_close source completes the
   // funnel (sessions otherwise only close on a mode switch).
@@ -1759,47 +1841,72 @@ export default function App() {
                 icon — the dot slides left (camera) or right (keyboard).
                 One click anywhere always toggles. */}
             {!isMobile && (
-            <button
-              className={`mode-switch-toggle mobile-collapse${pulseModeSwitch ? ' help-pulse' : ''}`}
-              onClick={() => handleKeyboardToggle(!keyboardMode, 'toolbar')}
-              role="switch"
-              aria-checked={keyboardMode}
-              data-tip={keyboardMode
-                ? 'Switch to camera mode — play with hand gestures'
-                : 'Switch to keyboard mode — no camera needed'}
-            >
-              {/* Camera pictogram (Apple-style) — no magenta slash (that
-                  slash marks STOP on the button next to it) */}
-              <svg className={`mode-switch-icon${!keyboardMode ? ' active' : ''}`} width="16" height="13" viewBox="0 0 24 24" fill="none">
-                <rect x="2" y="6.6" width="14.5" height="10" rx="2" stroke="currentColor" strokeWidth="1.9" />
-                <path d="M7.2 6.6 L8.3 4.3 L12.4 4.3 L13.5 6.6" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
-                <circle cx="9.3" cy="11.6" r="2.4" stroke="currentColor" strokeWidth="1.9" />
-              </svg>
-              <span className="mode-switch-track">
-                <span className={`mode-switch-dot${keyboardMode ? ' right' : ''}`} />
-              </span>
-              {/* Keyboard pictogram — stroke-based to match the camera icon's
-                  style (the dot-grid glyph used on the landing button
-                  turns into an unreadable smudge at this toolbar size). */}
-              <svg className={`mode-switch-icon${keyboardMode ? ' active' : ''}`} width="16" height="13" viewBox="0 0 24 24" fill="none">
-                <rect x="2" y="5" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
-                <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14.5h12" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-              </svg>
-            </button>
+            <div className="mode-switch-group" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <button
+                className={`mode-switch-toggle mobile-collapse${pulseModeSwitch ? ' help-pulse' : ''}`}
+                onClick={() => {
+                  if (keyboardMode) {
+                    handleKeyboardToggle(false, 'toolbar');
+                  } else if (midiMode) {
+                    handleMidiToggle(false, 'toolbar');
+                  } else {
+                    handleKeyboardToggle(true, 'toolbar');
+                  }
+                }}
+                role="switch"
+                aria-checked={keyboardMode || midiMode}
+                data-tip={!keyboardMode && !midiMode
+                  ? 'Switch to keyboard mode — no camera needed'
+                  : keyboardMode
+                    ? 'Switch to MIDI mode — use a controller'
+                    : 'Switch to camera mode — play with hand gestures'}
+              >
+                {/* Camera pictogram (Apple-style) — no magenta slash (that
+                    slash marks STOP on the button next to it) */}
+                <svg className={`mode-switch-icon${!keyboardMode && !midiMode ? ' active' : ''}`} width="16" height="13" viewBox="0 0 24 24" fill="none">
+                  <rect x="2" y="6.6" width="14.5" height="10" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                  <path d="M7.2 6.6 L8.3 4.3 L12.4 4.3 L13.5 6.6" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
+                  <circle cx="9.3" cy="11.6" r="2.4" stroke="currentColor" strokeWidth="1.9" />
+                </svg>
+                <span className="mode-switch-track" style={{ position: 'relative', width: '48px', height: '16px', borderRadius: '8px', background: 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', padding: '2px' }}>
+                  {/* Three-position dot: left=camera, middle=keyboard, right=midi */}
+                  <span className={`mode-switch-dot`} style={{
+                    position: 'absolute',
+                    width: '12px', height: '12px', borderRadius: '6px',
+                    background: keyboardMode ? 'var(--neon-cyan)' : midiMode ? 'var(--neon-purple)' : 'var(--neon-magenta)',
+                    transform: keyboardMode ? 'translateX(18px)' : midiMode ? 'translateX(34px)' : 'translateX(2px)',
+                    transition: 'transform 0.2s ease, background 0.2s ease',
+                  }} />
+                </span>
+                {/* Keyboard pictogram — stroke-based to match the camera icon's
+                    style (the dot-grid glyph used on the landing button
+                    turns into an unreadable smudge at this toolbar size). */}
+                <svg className={`mode-switch-icon${keyboardMode ? ' active' : ''}`} width="16" height="13" viewBox="0 0 24 24" fill="none" style={{ opacity: keyboardMode ? 1 : 0.4 }}>
+                  <rect x="2" y="5" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                  <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14.5h12" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                </svg>
+                {/* MIDI controller pictogram */}
+                <svg className={`mode-switch-icon${midiMode ? ' active' : ''}`} width="16" height="13" viewBox="0 0 24 24" fill="none" style={{ opacity: midiMode ? 1 : 0.4, marginLeft: '-20px' }}>
+                  <rect x="2" y="5" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                  <path d="M5 10h14M5 14h14M7 10v4M10 10v4M13 10v4M16 10v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <circle cx="19" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </button>
+            </div>
             )}
             {/* Stop is CAMERA-mode only (user decision 2026-08-09): in
-                keyboard mode there's no camera to stop and the Camera
-                capsule takes its role (leaving keyboard mode), so the
+                keyboard/midi mode there's no camera to stop and the Camera
+                capsule takes its role (leaving the mode), so the
                 misleading stop-camera button is hidden there. In camera
                 mode it stays — the only way to leave the playing scene
                 back to the landing. HIDDEN with visibility (not unmount)
-                in keyboard mode — the centered toolbar must not shift
+                in keyboard/midi mode — the centered toolbar must not shift
                 when toggling modes (user decision 2026-08-09). */}
             <button
               className="icon-btn mobile-collapse"
               onClick={stopCamera}
               data-tip="Stop camera and audio"
-              style={keyboardMode ? { visibility: 'hidden' } : undefined}
+              style={(keyboardMode || midiMode) ? { visibility: 'hidden' } : undefined}
             >
               {/* video.slash — camera pictogram + magenta cross (Apple-style) */}
               <svg width="20" height="17" viewBox="0 0 24 24" fill="none">
@@ -2192,23 +2299,27 @@ export default function App() {
               <>
                 <button
                   className="enable-camera-btn"
-                  onClick={keyboardMode ? () => startKeyboardMode('main_button') : () => startCamera()}
+                  onClick={keyboardMode ? () => startKeyboardMode('main_button') : midiMode ? () => startMidiMode('main_button') : () => startCamera()}
                   disabled={isLoading}
                   onMouseEnter={prefetchTracking}
                   onFocus={prefetchTracking}
                   onTouchStart={prefetchTracking}
                 >
                   <svg className="enable-camera-btn-icon" viewBox="0 0 20 20" fill="currentColor" width="20" height="20">
-                    {keyboardMode ? (
-                      <path fillRule="evenodd" d="M3 6a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V6zm2.5 1a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zM5 9.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm4 0a.5.5 0 100 1 .5.5 0 000-1zM9 11.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zM5 13.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm4 0a.5.5 0 100 1 .5.5 0 000-1zm-1-3a.5.5 0 100 1 .5.5 0 000-1zm3 0a.5.5 0 100 1 .5.5 0 000-1z" clipRule="evenodd" />
+                    {midiMode ? (
+                      <path fillRule="evenodd" d="M3 6a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V6zm2.5 1a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm4 0a.5.5 0 100 1 .5.5 0 000-1zM9 11.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zM5 13.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm4 0a.5.5 0 100 1 .5.5 0 000-1zm-1-3a.5.5 0 100 1 .5.5 0 000-1zm3 0a.5.5 0 100 1 .5.5 0 000-1z" clipRule="evenodd" />
+                    ) : keyboardMode ? (
+                      <path fillRule="evenodd" d="M3 6a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V6zm2.5 1a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm4 0a.5.5 0 100 1 .5.5 0 000-1zM9 11.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zM5 13.5a.5.5 0 100 1 .5.5 0 000-1zm2 0a.5.5 0 100 1 .5.5 0 000-1zm4 0a.5.5 0 100 1 .5.5 0 000-1zm-1-3a.5.5 0 100 1 .5.5 0 000-1zm3 0a.5.5 0 100 1 .5.5 0 000-1z" clipRule="evenodd" />
                     ) : (
                       <path fillRule="evenodd" d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2H4zm10 1.5l3.5-2.25A.75.75 0 0118.5 5v10a.75.75 0 01-1 .69L14 13.5V6.5z" clipRule="evenodd" />
                     )}
                   </svg>
-                  <span>{keyboardMode ? 'Start Playing (Keyboard)' : 'Enable Camera'}</span>
+                  <span>{midiMode ? 'Start Playing (MIDI)' : keyboardMode ? 'Start Playing (Keyboard)' : 'Enable Camera'}</span>
                 </button>
                 <p className="camera-placeholder-hint">
-                  {keyboardMode
+                  {midiMode
+                    ? 'Connect your MIDI controller — keys play chords, knobs control expression, transport buttons control playback'
+                    : keyboardMode
                     ? 'Hold 1-7 to play · [ ] major-minor · 8/9/0/- style · Shift octave · arrows volume/filter · Space stop'
                     : 'Allow camera access to start playing with hand gestures'}
                 </p>

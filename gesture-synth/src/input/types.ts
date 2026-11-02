@@ -1,18 +1,18 @@
 /**
  * Input source abstraction (2026-08-09, refactor/input-engine-architecture).
  *
- * Architecture: every input source (camera, keyboard, future MIDI)
+ * Architecture: every input source (camera, keyboard, MIDI)
  * produces the SAME payload — a pair of `HandData` (left/right, or null) —
  * which App consumes through one pipeline ("every input reaches the same
  * audio engine", the competitor .online principle). Hand-gesture-only
  * concerns (detection smoothing) live inside CameraSource; synthetic
- * sources like KeyboardSource emit already-stable HandData.
+ * sources like KeyboardSource and MidiSource emit already-stable HandData.
  */
 
 import type { HandData } from '../types';
 
 /** Which input source is driving the instrument right now. */
-export type InputSource = 'camera' | 'keyboard';
+export type InputSource = 'camera' | 'keyboard' | 'midi';
 
 /** One processed frame from any source: stable hands or null. */
 export interface HandFrame {
@@ -23,7 +23,7 @@ export interface HandFrame {
   source: InputSource;
 }
 
-/** Common interface for all input sources (future MIDI source implements this). */
+/** Common interface for all input sources (future sources implement this). */
 export interface HandInputSource {
   readonly kind: InputSource;
   /** Produce the current stable hand pair (nulls = hand absent).
