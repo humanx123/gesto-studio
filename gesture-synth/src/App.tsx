@@ -7,10 +7,9 @@ import { audioEngine } from './audioEngine';
 import { noteChord } from './bridge';
 import { CameraSource } from './input/cameraSource';
 import { KeyboardSource } from './input/keyboardSource';
-import { MidiSource, type MidiMessageSpec } from './input/midiSource';
+import { MidiSource, type MidiDeviceInfo } from './input/midiSource';
 import type { HandFrame } from './input/types';
 import { DEFAULT_KEYMAP, displayKey, loadKeymap, saveKeymap, type KbAction } from './input/keymap';
-import { DEFAULT_MIDI_MAP, loadMidiMap, saveMidiMap, type MidiAction, type MidiMap, MIDI_ACTION_ORDER, MIDI_ACTION_META, matchingMidiPresetId, displayMidiMessage, type MidiKeymapPreset } from './input/midiKeymap';
 import { KbGuide } from './components/KbGuide';
 import { SettingsPanel } from './components/SettingsPanel';
 import { HelpModal } from './components/HelpModal';
@@ -343,19 +342,11 @@ export default function App() {
   });
   const midiModeRef = useRef(midiMode);
   useEffect(() => { midiModeRef.current = midiMode; }, [midiMode]);
-  // Player-customizable MIDI mappings — persisted so rebinds survive visits.
-  const [midiMap, setMidiMapState] = useState<MidiMap>(() => loadMidiMap());
-  const handleMidiMapChange = useCallback((map: MidiMap) => {
-    saveMidiMap(map);
-    setMidiMapState(map);
-  }, []);
-  useEffect(() => {
-    midiSourceRef.current?.selectInput(midiSourceRef.current.getSelectedInputId()); // re-apply mappings
-  }, [midiMap]);
-  // MIDI access request (async, done once when first entering MIDI mode)
-  const [midiInputs, setMidiInputs] = useState<MIDIInput[]>([]);
+  // Controllers found, and which one is listening — drives the indicator below.
+  const [midiInputs, setMidiInputs] = useState<MidiDeviceInfo[]>([]);
   const [midiSelectedInputId, setMidiSelectedInputId] = useState<string | null>(null);
   const [midiAccessRequested, setMidiAccessRequested] = useState(false);
+  const [midiError, setMidiError] = useState<string | null>(null);
   // Mirrored into a ref so the keydown/keyup effect (empty deps, see below)
   // always reads the current bindings without re-subscribing listeners.
   const mappedKeysRef = useRef<string[]>([...Object.values(DEFAULT_KEYMAP), ' ']);
@@ -1654,38 +1645,65 @@ export default function App() {
     // (!on && !isRunning): just flips the mode on the landing — no start.
   }, [isRunning, stopCamera, startCamera]);
 
-  async function startMidiMode(source: 'toolbar' | 'settings' | 'main_button' = 'settings'): Promise<void> {
-    if (midiModeRef.current) return;
+  async function startMidiMode(_source: 'toolbar' | 'settings' | 'main_button' = 'settings'): Promise<void> {
     stopCamera();
-    // Request MIDI access if not already done
-    if (!midiAccessRequested) {
+    setMidiError(null);
+    if (!MidiSource.supported) {
+      setMidiError('This browser cannot talk to MIDI devices. Chrome or Edge can; Safari and Firefox cannot.');
+      setMidiMode(false);
+      return;
+    }
+    const source = midiSourceRef.current;
+    if (!source) return;
+    let devices: MidiDeviceInfo[];
+    try {
       setMidiAccessRequested(true);
-      try {
-        const inputs = await midiSourceRef.current?.requestAccess();
-        if (inputs) setMidiInputs(inputs);
-      } catch (e) {
-        console.warn('MIDI access failed:', e);
-        setMidiMode(false);
-        return;
-      }
+      // The returned list is used directly: reading the midiInputs STATE here
+      // would be the pre-update value, so the device was never selected.
+      devices = await source.requestAccess();
+      source.setOnDevices(() => {
+        const live = source.listDevices();
+        setMidiInputs(live);
+        setMidiSelectedInputId(source.getStatus().selectedId);
+      });
+    } catch (e) {
+      const denied = e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+      setMidiError(denied ? 'MIDI access was denied. Allow it in the site permissions.' : `MIDI could not start: ${getErrorMessage(e)}`);
+      setMidiMode(false);
+      return;
     }
-    // Auto-select first input if none selected
-    if (!midiSelectedInputId && midiInputs.length > 0) {
-      const firstId = midiInputs[0].id;
-      setMidiSelectedInputId(firstId);
-      midiSourceRef.current?.selectInput(firstId);
+    setMidiInputs(devices);
+    if (!devices.length) {
+      setMidiError('No MIDI controller found. Connect one over USB and press Start again.');
+      setMidiMode(false);
+      return;
     }
-    midiSourceRef.current?.reset();
+    const chosen = source.selectDevice(devices[0].id);
+    setMidiSelectedInputId(chosen?.id ?? null);
     keyboardSourceRef.current?.reset();
     setMidiMode(true);
-    // Start the animation loop (will be picked up by the rAF effect)
-    // The loop runs when isRunning becomes true, so we just need to ensure the mode is set
+    setError(null);
+    setCameraErrorType(null);
+    firstGestureSentRef.current = false;
+    setIsLoading(false);
+    // Same reason as keyboard mode: without this the engine was never
+    // initialized on a first-ever start and the controller played silently.
+    await audioEngine.init();
+    setIsRunning(true);
   }
 
   function stopMidi() {
-    midiSourceRef.current?.reset();
-    // Don't stop the audio engine here - let the caller decide
+    midiSourceRef.current?.setOnDevices(null);
+    midiSourceRef.current?.dispose();
+    setMidiSelectedInputId(null);
   }
+
+  /** Listen to a different controller without leaving MIDI mode. */
+  const selectMidiDevice = useCallback((deviceId: string) => {
+    const chosen = midiSourceRef.current?.selectDevice(deviceId) ?? null;
+    setMidiSelectedInputId(chosen?.id ?? null);
+    audioEngine.stopAll();
+  }, []);
 
   // Keyboard session end on tab close/reload: visibilitychange fires
   // reliably on both, so the exit event's page_close source completes the
@@ -2214,6 +2232,37 @@ export default function App() {
           works={works}
           onDeleteWork={deleteWorkById}
         />
+
+        {/* ─── MIDI connection indicator ──────────────────────────────
+            A controller that is plugged in but sending nothing looks exactly
+            like a wrong channel or split point, so the dot separates
+            "connected" from "receiving" and the picker handles several
+            controllers. */}
+        {isRunning && midiMode && (
+          <div className={`midi-indicator${midiSelectedInputId ? (midiInputs.length ? ' live' : '') : ' off'}`} role="status" aria-live="polite">
+            <span className="midi-indicator-dot" aria-hidden="true" />
+            <span>
+              {midiSelectedInputId
+                ? midiInputs.find((d) => d.id === midiSelectedInputId)?.name ?? 'MIDI controller'
+                : 'No controller'}
+            </span>
+            {midiInputs.length > 1 && (
+              <select
+                value={midiSelectedInputId ?? ''}
+                onChange={(e) => selectMidiDevice(e.target.value)}
+                aria-label="MIDI controller"
+              >
+                {midiInputs.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+            )}
+          </div>
+        )}
+        {midiError && !isRunning && (
+          <div className="midi-indicator off" role="alert">
+            <span className="midi-indicator-dot" aria-hidden="true" />
+            <span>{midiError}</span>
+          </div>
+        )}
 
         {/* ─── Hand tags on sides (running only) ─────────────────────── */}
         {isRunning && (

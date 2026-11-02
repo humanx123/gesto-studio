@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { ChordReader, type HarmonyMode, type StyleMode } from '@gesto/chordReader';
 import { CameraSource } from '@gesto/input/cameraSource';
 import { KeyboardSource } from '@gesto/input/keyboardSource';
-import { MidiSource } from '@gesto/input/midiSource';
+import { MidiSource, type MidiDeviceInfo } from '@gesto/input/midiSource';
 import { loadKeymap } from '@gesto/input/keymap';
 import type { HandFrame } from '@gesto/input/types';
 import {
@@ -66,6 +66,13 @@ interface GestoState {
   bandLive: boolean;
   /** Energy the hands give the reactive band, 0–1 (for the meter). */
   energy: number;
+  /** MIDI controllers plugged in, for the picker. */
+  midiDevices: MidiDeviceInfo[];
+  /** The controller being listened to, null when none. */
+  midiDeviceId: string | null;
+  midiDeviceName: string | null;
+  /** The controller has sent something, so the indicator can say "receiving". */
+  midiReceiving: boolean;
   setSettings: (patch: Partial<GestoSettings>) => void;
 }
 
@@ -120,6 +127,10 @@ export const useGesto = create<GestoState>((set, get) => ({
   captured: 0,
   bandLive: false,
   energy: CALM.energy,
+  midiDevices: [],
+  midiDeviceId: null,
+  midiDeviceName: null,
+  midiReceiving: false,
   setSettings: (patch) => {
     const before = get().settings;
     const settings = { ...before, ...patch };
@@ -358,11 +369,20 @@ function onFrame(frame: HandFrame) {
   if (Math.abs(reading.volume - s.volume) > 0.04) useGesto.setState({ volume: reading.playing ? reading.volume : 0 });
 }
 
+/** A controller counts as live while it said something in the last few seconds. */
+const MIDI_IDLE_MS = 4000;
+
 function loop() {
   const { input } = useGesto.getState();
   if (input === 'camera' && video && video.readyState >= 2) onFrame(camera.getFrame(video, performance.now()));
   else if (input === 'keyboard') onFrame(keyboard.getFrame());
-  else if (input === 'midi') onFrame(midi.getFrame());
+  else if (input === 'midi') {
+    onFrame(midi.getFrame());
+    // Only write to the store on a change: this runs at 60 fps.
+    const since = midi.getStatus().sinceActivityMs;
+    const receiving = since !== null && since < MIDI_IDLE_MS;
+    if (receiving !== useGesto.getState().midiReceiving) useGesto.setState({ midiReceiving: receiving });
+  }
   raf = requestAnimationFrame(loop);
 }
 
@@ -424,24 +444,72 @@ export function startKeyboard() {
   void syncBand();
 }
 
-export function startMidi() {
+/** Mirror the controller list into the store so the picker and indicator follow hot-plug. */
+function refreshMidiDevices() {
+  const devices = midi.listDevices();
+  const selected = devices.find((d) => d.id === midi.getStatus().selectedId) ?? null;
+  useGesto.setState({ midiDevices: devices, midiDeviceId: selected?.id ?? null, midiDeviceName: selected?.name ?? null });
+  // The controller was unplugged while playing: say so instead of looking idle.
+  if (useGesto.getState().input === 'midi' && !selected) {
+    useGesto.setState({ status: 'error', error: 'The MIDI controller was disconnected. Plug it back in or pick another one.', midiReceiving: false });
+  }
+}
+
+export async function startMidi() {
   if (useGesto.getState().input === 'midi') return;
   stopInput();
   ensureTrack();
-  // Request MIDI access
-  midi.requestAccess().then((inputs) => {
-    if (inputs.length > 0) {
-      midi.selectInput(inputs[0].id);
-      useGesto.setState({ input: 'midi', status: 'ready', error: null });
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(loop);
-      void syncBand();
-    } else {
-      useGesto.setState({ input: 'off', status: 'error', error: 'No MIDI input devices found. Connect your controller and try again.' });
+  if (!MidiSource.supported) {
+    useGesto.setState({ status: 'error', error: 'This browser cannot talk to MIDI devices. Chrome or Edge on desktop and Android can; Safari and Firefox cannot.' });
+    return;
+  }
+  useGesto.setState({ input: 'midi', status: 'loading', error: null, midiReceiving: false });
+  try {
+    const devices = await midi.requestAccess();
+    if (useGesto.getState().input !== 'midi') return; // switched away while the prompt was open
+    midi.setOnDevices(refreshMidiDevices);
+    if (!devices.length) {
+      useGesto.setState({ midiDevices: [], midiDeviceId: null, midiDeviceName: null, status: 'error', error: 'No MIDI controller found. Connect one over USB and it will appear here.' });
+      return;
     }
-  }).catch((e) => {
-    useGesto.setState({ input: 'off', status: 'error', error: `MIDI access failed: ${(e as Error).message ?? e}` });
+    const chosen = midi.selectDevice(devices[0].id);
+    reader.reset();
+    useGesto.setState({
+      status: 'ready', error: null,
+      midiDevices: devices, midiDeviceId: chosen?.id ?? null, midiDeviceName: chosen?.name ?? null,
+    });
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(loop);
+    void syncBand();
+  } catch (e) {
+    const denied = e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+    useGesto.setState({
+      input: 'off', status: 'error',
+      error: denied ? 'MIDI access was denied. Allow it in the site permissions, or play with the keyboard instead.' : `MIDI could not start: ${(e as Error).message ?? e}`,
+    });
+  }
+}
+
+/** Listen to a different controller without leaving MIDI mode. */
+export function setMidiDevice(deviceId: string) {
+  const chosen = midi.selectDevice(deviceId);
+  reader.reset();
+  release();
+  useGesto.setState({
+    midiDeviceId: chosen?.id ?? null,
+    midiDeviceName: chosen?.name ?? null,
+    midiReceiving: false,
+    ...(chosen ? { status: 'ready' as const, error: null } : {}),
   });
+}
+
+/** The controller settings panel reads and writes these. */
+export const midiConfig = () => midi.getConfig();
+export function setMidiConfig(patch: Partial<ReturnType<typeof midiConfig>>) {
+  midi.setConfig(patch);
+  release();
+  // Nudge subscribers: the config lives in MidiSource, not the store.
+  useGesto.setState({ midiReceiving: useGesto.getState().midiReceiving });
 }
 
 export function stopInput() {
@@ -452,7 +520,10 @@ export function stopInput() {
   if (video) video.srcObject = null;
   window.removeEventListener('keydown', keyDown, true);
   window.removeEventListener('keyup', keyUp, true);
-  midi.reset();
+  // Let go of the controller: held keys must not keep sounding after Off.
+  midi.setOnDevices(null);
+  midi.dispose();
+  useGesto.setState({ midiDeviceId: null, midiDeviceName: null, midiReceiving: false });
   lastFrame = null;
   resetFeel();
   release();

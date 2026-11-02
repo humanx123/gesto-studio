@@ -2595,3 +2595,55 @@ body {
 .rec-works-icon { font-size: 0.8rem; }
 .rec-works-date { font-family: var(--font-mono); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rec-works-dur { color: var(--text-muted); font-size: 0.6rem; }
+
+/* ─── MIDI connection indicator ──────────────────────────────────────
+   Sits above the stage while MIDI mode plays. The dot is the state: green
+   and breathing = a controller is selected, red = none. The <select>
+   appears only when more than one controller is plugged in. */
+.midi-indicator {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(92vw, 420px);
+  padding: 6px 12px;
+  background: var(--frost-bg);
+  backdrop-filter: var(--frost-blur);
+  border: 1px solid rgba(0, 255, 204, 0.3);
+  border-radius: 14px;
+  color: var(--neon-cyan);
+  font-size: 0.68rem;
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+}
+.midi-indicator.off {
+  border-color: rgba(255, 0, 255, 0.35);
+  color: var(--neon-magenta);
+}
+.midi-indicator-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.midi-indicator.live .midi-indicator-dot {
+  box-shadow: 0 0 0 3px rgba(0, 255, 204, 0.22);
+  animation: midi-indicator-pulse 1.4s ease-in-out infinite;
+}
+.midi-indicator select {
+  font-size: 0.6rem;
+  padding: 1px 4px;
+  max-width: 45%;
+}
+@keyframes midi-indicator-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .midi-indicator.live .midi-indicator-dot { animation: none; }
+}

@@ -7,9 +7,10 @@ import { formatPosition } from '../../model/project';
 import { useDaw, useTransport } from '../../state/store';
 import { useAgent } from '../../agent/agent';
 import {
-  cameraVideo, isPlayable, latestFrame, newGestoTrack, setPreset, setTrack, startCamera, startKeyboard, startMidi,
-  startRecording, stopInput, stopRecording, toggleJam, useGesto,
+  cameraVideo, isPlayable, latestFrame, midiConfig, newGestoTrack, setMidiConfig, setMidiDevice, setPreset, setTrack,
+  startCamera, startKeyboard, startMidi, startRecording, stopInput, stopRecording, toggleJam, useGesto,
 } from '../../gesto/session';
+import { CHORD_STYLE_LABELS, SPLIT_OPTIONS, MIDI_CONTROL_REFERENCE, noteName } from '@gesto/input/midiKeymap';
 import { BASS_STYLES, GROOVES, type BassStyle, type Groove } from '../../gesto/band';
 import { Square, LoaderCircle, Metronome, Piano, CircleAlert, Play, Drum, Eye } from '../icons';
 
@@ -94,6 +95,96 @@ function ChordBadge() {
     <div className={`gesto-chord ${chord ? 'on' : ''}`} aria-live="polite">
       <b>{chord ?? '—'}</b>
       <span className="gesto-meter" aria-hidden><span style={{ width: `${Math.round(volume * 100)}%` }} /></span>
+    </div>
+  );
+}
+
+/**
+ * MIDI connection indicator: says which controller is listening and whether it
+ * is actually sending anything, so a silent controller can be told apart from
+ * a wrong split point or a wrong channel.
+ */
+function MidiStatus() {
+  const input = useGesto((s) => s.input);
+  const status = useGesto((s) => s.status);
+  const devices = useGesto((s) => s.midiDevices);
+  const deviceId = useGesto((s) => s.midiDeviceId);
+  const deviceName = useGesto((s) => s.midiDeviceName);
+  const receiving = useGesto((s) => s.midiReceiving);
+  if (input !== 'midi') return null;
+
+  const state = status === 'loading' ? 'waiting'
+    : status === 'error' || !deviceId ? 'off'
+    : receiving ? 'live' : 'idle';
+  const label = state === 'waiting' ? 'Asking for MIDI access…'
+    : state === 'off' ? 'No controller'
+    : state === 'live' ? `${deviceName} · receiving`
+    : `${deviceName} · connected`;
+
+  return (
+    <div className={`gesto-midi-status ${state}`} role="status" aria-live="polite">
+      <span className="gesto-midi-dot" aria-hidden />
+      <span className="gesto-midi-label">{label}</span>
+      {devices.length > 1 && (
+        <select
+          className="gesto-midi-pick"
+          value={deviceId ?? ''}
+          onChange={(e) => setMidiDevice(e.target.value)}
+          aria-label="MIDI controller"
+        >
+          {devices.map((d) => <option key={d.id} value={d.id}>{d.manufacturer ? `${d.name} — ${d.manufacturer}` : d.name}</option>)}
+        </select>
+      )}
+      {state === 'idle' && <small>Press a key or move a knob.</small>}
+    </div>
+  );
+}
+
+/** Controller layout: where the keyboard splits and what the upper keys do. */
+function MidiSettings() {
+  const input = useGesto((s) => s.input);
+  // The config lives in MidiSource; re-read on every render the store touches.
+  const receiving = useGesto((s) => s.midiReceiving);
+  void receiving;
+  const cfg = midiConfig();
+  if (input !== 'midi') return null;
+  return (
+    <div className="gesto-settings">
+      <label className="field">
+        <span>Split point</span>
+        <select value={cfg.splitNote} onChange={(e) => setMidiConfig({ splitNote: Number(e.target.value) })}>
+          {SPLIT_OPTIONS.map((o) => <option key={o.note} value={o.note}>{o.label}</option>)}
+        </select>
+        <small>Keys below {noteName(cfg.splitNote)} pick the chord; keys above it pick the voicing.</small>
+      </label>
+      <label className="field">
+        <span>Voicing at rest</span>
+        <select value={cfg.restingChordStyle} onChange={(e) => setMidiConfig({ restingChordStyle: Number(e.target.value) })}>
+          {CHORD_STYLE_LABELS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        <small>Used while you hold no key above the split.</small>
+      </label>
+      <label className="field">
+        <span>MIDI channel</span>
+        <select value={cfg.channel} onChange={(e) => setMidiConfig({ channel: Number(e.target.value) })}>
+          <option value={0}>All channels (recommended)</option>
+          {Array.from({ length: 16 }, (_, i) => <option key={i + 1} value={i + 1}>{`Channel ${i + 1}`}</option>)}
+        </select>
+      </label>
+      <div className="gesto-toggles">
+        <label className="toggle">
+          <input type="checkbox" checked={cfg.pitchBendTilt} onChange={(e) => setMidiConfig({ pitchBendTilt: e.target.checked })} />
+          <span>Pitch bend tilts major / minor<small>Only does anything with Left hand set to wrist tilt.</small></span>
+        </label>
+      </div>
+      <details className="gesto-help wide">
+        <summary>What each control does</summary>
+        <table className="gesto-midi-map">
+          <tbody>
+            {MIDI_CONTROL_REFERENCE.map((r) => <tr key={r.control}><th>{r.control}</th><td>{r.does}</td></tr>)}
+          </tbody>
+        </table>
+      </details>
     </div>
   );
 }
@@ -289,12 +380,14 @@ export function GestoPanel({ hidden }: { hidden: boolean }) {
       <div className="gesto-inputs" role="radiogroup" aria-label="Gesto input">
         <button className={`btn ${input === 'camera' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'camera'} onClick={() => void startCamera()}>Camera</button>
         <button className={`btn ${input === 'keyboard' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'keyboard'} onClick={startKeyboard}>Keyboard</button>
-        <button className={`btn ${input === 'midi' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'midi'} onClick={startMidi}>MIDI</button>
+        <button className={`btn ${input === 'midi' ? 'solid on' : ''}`} role="radio" aria-checked={input === 'midi'} onClick={() => void startMidi()}>MIDI</button>
         <button className={`btn ${input === 'off' ? 'solid' : ''}`} role="radio" aria-checked={input === 'off'} onClick={stopInput}>Off</button>
       </div>
+      <MidiStatus />
       {error && <div className="err gesto-err"><CircleAlert size={14} /> {error}</div>}
       <RecordBar />
       <BandSettings />
+      <MidiSettings />
       <Settings />
       <details className="gesto-help">
         <summary>How to play</summary>

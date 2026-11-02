@@ -1,166 +1,101 @@
 /**
- * Customizable MIDI controller mappings (2026-11).
+ * MIDI controller settings (2026-11-02).
  *
- * Like the keyboard keymap, this is the single source of truth for default
- * bindings, their display copy, and localStorage persistence of player overrides.
- * MidiSource reads/writes through this so nothing drifts.
+ * The first draft of this file declared 22 rebindable "actions" (one per knob,
+ * transport button and wheel) — but MidiSource.handleMessage read hardcoded
+ * controller numbers and ignored the map entirely, so nothing a player changed
+ * here had any effect. It is now the small set of settings that MidiSource
+ * actually reads, persisted to localStorage, plus the fixed control reference
+ * the settings UI prints.
+ *
+ * Controls that are genuinely standard (mod wheel CC 1, sustain CC 64,
+ * brightness CC 74, pan CC 10, expression CC 11, pitch bend) stay fixed:
+ * every class-compliant controller sends them on those numbers, so a rebinding
+ * UI would be ceremony with no payoff.
  */
 
-export interface MidiMessageSpec {
-  type: 'note' | 'cc' | 'pitchbend' | 'program';
-  channel: number; // 1-16
-  note?: number;   // for note type
-  controller?: number; // for cc type
-  /** Human-readable description */
-  label: string;
+export interface MidiConfig {
+  /**
+   * Keys below this note drive harmony, keys at or above it drive the voicing.
+   * Default 60 (C4) splits a 25-key C3–C5 controller into 12 + 13 keys.
+   */
+  splitNote: number;
+  /**
+   * MIDI channel to listen on: 0 = every channel (right for single-channel
+   * controllers such as the SMK25), 1-16 pins it to one.
+   */
+  channel: number;
+  /** Chord style while no upper key is held: 1 triad · 2 inv · 3 seventh · 4 ninth. */
+  restingChordStyle: number;
+  /** Pitch bend acts as wrist tilt (major/minor in tilt harmony mode). */
+  pitchBendTilt: boolean;
 }
 
-export type MidiAction =
-  // Left hand (harmony) - note messages on channel 1
-  | 'leftNoteOn' | 'leftNoteOff'
-  // Right hand (expression) - note messages on channel 2
-  | 'rightNoteOn' | 'rightNoteOff'
-  // Expression controls (CCs)
-  | 'volume'        // CC 7 - master volume
-  | 'pan'           // CC 10 - pan/tilt
-  | 'expression'    // CC 11 - expression
-  | 'modWheel'      // CC 1 - mod wheel
-  | 'brightness'    // CC 74 - brightness/filter
-  | 'resonance'     // CC 71 - resonance
-  | 'reverbSend'    // CC 91 - reverb send
-  | 'chorusSend'    // CC 93 - chorus send
-  | 'portamentoTime' // CC 5 - portamento time
-  | 'portamentoControl' // CC 84 - portamento control
-  // Special controls
-  | 'pitchBend'     // Pitch bend wheel
-  | 'sustain'       // CC 64 - sustain pedal
-  // Transport (configurable notes/CCs)
-  | 'transportPlay'
-  | 'transportStop'
-  | 'transportRecord'
-  | 'tapTempo'
-  | 'octaveDown'
-  | 'octaveUp';
-
-export interface MidiActionMeta {
-  label: string;
-  group: 'harmony' | 'expression' | 'transport' | 'special';
-  /** Default message spec for this action */
-  defaultSpec: MidiMessageSpec;
-}
-
-export const MIDI_ACTION_META: Record<MidiAction, MidiActionMeta> = {
-  leftNoteOn:   { label: 'Left hand notes (Ch 1)', group: 'harmony',   defaultSpec: { type: 'note', channel: 1, note: 0, label: 'Note On Ch 1' } },
-  leftNoteOff:  { label: 'Left hand release (Ch 1)', group: 'harmony', defaultSpec: { type: 'note', channel: 1, note: 0, label: 'Note Off Ch 1' } },
-  rightNoteOn:  { label: 'Right hand notes (Ch 2)', group: 'expression', defaultSpec: { type: 'note', channel: 2, note: 0, label: 'Note On Ch 2' } },
-  rightNoteOff: { label: 'Right hand release (Ch 2)', group: 'expression', defaultSpec: { type: 'note', channel: 2, note: 0, label: 'Note Off Ch 2' } },
-  volume:       { label: 'Volume (CC 7)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 7, label: 'CC 7 Volume' } },
-  pan:          { label: 'Pan / Tilt (CC 10)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 10, label: 'CC 10 Pan' } },
-  expression:   { label: 'Expression (CC 11)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 11, label: 'CC 11 Expression' } },
-  modWheel:     { label: 'Mod Wheel (CC 1)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 1, label: 'CC 1 Mod Wheel' } },
-  brightness:   { label: 'Brightness (CC 74)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 74, label: 'CC 74 Brightness' } },
-  resonance:    { label: 'Resonance (CC 71)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 71, label: 'CC 71 Resonance' } },
-  reverbSend:   { label: 'Reverb Send (CC 91)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 91, label: 'CC 91 Reverb' } },
-  chorusSend:   { label: 'Chorus Send (CC 93)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 93, label: 'CC 93 Chorus' } },
-  portamentoTime: { label: 'Portamento Time (CC 5)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 5, label: 'CC 5 Portamento Time' } },
-  portamentoControl: { label: 'Portamento Ctrl (CC 84)', group: 'expression', defaultSpec: { type: 'cc', channel: 1, controller: 84, label: 'CC 84 Portamento Ctrl' } },
-  pitchBend:    { label: 'Pitch Bend Wheel', group: 'special', defaultSpec: { type: 'pitchbend', channel: 1, label: 'Pitch Bend Ch 1' } },
-  sustain:      { label: 'Sustain Pedal (CC 64)', group: 'special', defaultSpec: { type: 'cc', channel: 1, controller: 64, label: 'CC 64 Sustain' } },
-  transportPlay:  { label: 'Play', group: 'transport', defaultSpec: { type: 'note', channel: 1, note: 117, label: 'Note 117 (F#8) Play' } },
-  transportStop:  { label: 'Stop', group: 'transport', defaultSpec: { type: 'note', channel: 1, note: 118, label: 'Note 118 (G8) Stop' } },
-  transportRecord:{ label: 'Record', group: 'transport', defaultSpec: { type: 'note', channel: 1, note: 119, label: 'Note 119 (G#8) Record' } },
-  tapTempo:     { label: 'Tap Tempo', group: 'transport', defaultSpec: { type: 'note', channel: 1, note: 120, label: 'Note 120 (A8) Tap' } },
-  octaveDown:   { label: 'Octave Down', group: 'transport', defaultSpec: { type: 'note', channel: 1, note: 36, label: 'Note 36 (C2) Octave Down' } },
-  octaveUp:     { label: 'Octave Up', group: 'transport', defaultSpec: { type: 'note', channel: 1, note: 37, label: 'Note 37 (C#2) Octave Up' } },
+export const DEFAULT_MIDI_CONFIG: MidiConfig = {
+  splitNote: 60,
+  channel: 0,
+  restingChordStyle: 1,
+  pitchBendTilt: true,
 };
 
-export const MIDI_ACTION_ORDER: MidiAction[] = [
-  'leftNoteOn', 'leftNoteOff', 'rightNoteOn', 'rightNoteOff',
-  'volume', 'pan', 'expression', 'modWheel', 'brightness', 'resonance',
-  'reverbSend', 'chorusSend', 'portamentoTime', 'portamentoControl',
-  'pitchBend', 'sustain',
-  'transportPlay', 'transportStop', 'transportRecord', 'tapTempo',
-  'octaveDown', 'octaveUp',
+/** Split-point choices offered in the settings UI, with the octave named. */
+export const SPLIT_OPTIONS: ReadonlyArray<{ note: number; label: string }> = [
+  { note: 48, label: 'C3 — all keys play the voicing' },
+  { note: 55, label: 'G3' },
+  { note: 60, label: 'C4 (middle C) — recommended for 25 keys' },
+  { note: 67, label: 'G4' },
+  { note: 72, label: 'C5 — all keys play harmony' },
 ];
 
-/** Default mapping for Arturia MiniLab MkII / SMK25 */
-export const DEFAULT_MIDI_MAP: MidiMap = {
-  leftNoteOn:   { type: 'note', channel: 1, note: 0, label: 'Note On Ch 1 (any)' },
-  leftNoteOff:  { type: 'note', channel: 1, note: 0, label: 'Note Off Ch 1 (any)' },
-  rightNoteOn:  { type: 'note', channel: 2, note: 0, label: 'Note On Ch 2 (any)' },
-  rightNoteOff: { type: 'note', channel: 2, note: 0, label: 'Note Off Ch 2 (any)' },
-  volume:       { type: 'cc', channel: 1, controller: 7, label: 'CC 7 Volume' },
-  pan:          { type: 'cc', channel: 1, controller: 10, label: 'CC 10 Pan' },
-  expression:   { type: 'cc', channel: 1, controller: 11, label: 'CC 11 Expression' },
-  modWheel:     { type: 'cc', channel: 1, controller: 1, label: 'CC 1 Mod Wheel' },
-  brightness:   { type: 'cc', channel: 1, controller: 74, label: 'CC 74 Brightness' },
-  resonance:    { type: 'cc', channel: 1, controller: 71, label: 'CC 71 Resonance' },
-  reverbSend:   { type: 'cc', channel: 1, controller: 91, label: 'CC 91 Reverb' },
-  chorusSend:   { type: 'cc', channel: 1, controller: 93, label: 'CC 93 Chorus' },
-  portamentoTime: { type: 'cc', channel: 1, controller: 5, label: 'CC 5 Portamento Time' },
-  portamentoControl: { type: 'cc', channel: 1, controller: 84, label: 'CC 84 Portamento Ctrl' },
-  pitchBend:    { type: 'pitchbend', channel: 1, label: 'Pitch Bend Ch 1' },
-  sustain:      { type: 'cc', channel: 1, controller: 64, label: 'CC 64 Sustain' },
-  transportPlay:  { type: 'note', channel: 1, note: 117, label: 'Note 117 Play' },
-  transportStop:  { type: 'note', channel: 1, note: 118, label: 'Note 118 Stop' },
-  transportRecord:{ type: 'note', channel: 1, note: 119, label: 'Note 119 Record' },
-  tapTempo:     { type: 'note', channel: 1, note: 120, label: 'Note 120 Tap' },
-  octaveDown:   { type: 'note', channel: 1, note: 36, label: 'Note 36 Octave Down' },
-  octaveUp:     { type: 'note', channel: 1, note: 37, label: 'Note 37 Octave Up' },
-};
-
-export interface MidiKeymapPreset {
-  id: string;
-  label: string;
-  map: MidiMap;
-}
-
-export type MidiMap = Record<MidiAction, MidiMessageSpec>;
-
-/** Built-in presets for common controllers */
-export const MIDI_KEYMAP_PRESETS: MidiKeymapPreset[] = [
-  { id: 'smk25', label: 'Arturia MiniLab / SMK25 (default)', map: { ...DEFAULT_MIDI_MAP } },
-  { id: 'generic', label: 'Generic (Ch 1 = harmony, Ch 2 = expression)', map: { ...DEFAULT_MIDI_MAP } },
+export const CHORD_STYLE_LABELS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 1, label: 'Triad' },
+  { value: 2, label: 'First inversion' },
+  { value: 3, label: 'Seventh' },
+  { value: 4, label: 'Ninth' },
 ];
 
-export function matchingMidiPresetId(map: MidiMap): string {
-  const preset = MIDI_KEYMAP_PRESETS.find((p) => MIDI_ACTION_ORDER.every((a) => {
-    const saved = p.map[a];
-    const current = map[a];
-    return saved.type === current.type && saved.channel === current.channel &&
-           saved.note === current.note && saved.controller === current.controller;
-  }));
-  return preset?.id ?? 'custom';
-}
+/** What each control does — printed in the settings panel, not editable. */
+export const MIDI_CONTROL_REFERENCE: ReadonlyArray<{ control: string; does: string }> = [
+  { control: 'Keys below the split', does: 'Scale degree I–VII (the chord), velocity sets loudness' },
+  { control: 'Keys above the split', does: 'How many you hold picks the voicing: 1 triad · 2 inversion · 3 seventh · 4 ninth' },
+  { control: 'Mod wheel (CC 1)', does: 'Loudness, overriding velocity' },
+  { control: 'Pitch bend', does: 'Wrist tilt — bend up for major, down for minor (tilt harmony mode)' },
+  { control: 'Sustain pedal (CC 64)', does: 'Drops the chord an octave while held' },
+  { control: 'Knob on CC 74 or CC 10', does: 'Tone (the filter sweep)' },
+  { control: 'Expression pedal (CC 11)', does: 'Loudness, like the mod wheel' },
+];
 
-const MIDI_STORAGE_KEY = 'gesto-midi-keymap';
+const STORAGE_KEY = 'gesto-midi-config';
 
-export function loadMidiMap(): MidiMap {
+export function loadMidiConfig(): MidiConfig {
   try {
-    const raw = localStorage.getItem(MIDI_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_MIDI_MAP };
-    const saved = JSON.parse(raw) as Partial<MidiMap>;
-    return { ...DEFAULT_MIDI_MAP, ...saved };
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_MIDI_CONFIG };
+    const saved = JSON.parse(raw) as Partial<Record<keyof MidiConfig, unknown>>;
+    return {
+      splitNote: typeof saved.splitNote === 'number' && saved.splitNote >= 0 && saved.splitNote <= 127
+        ? Math.round(saved.splitNote) : DEFAULT_MIDI_CONFIG.splitNote,
+      channel: typeof saved.channel === 'number' && saved.channel >= 0 && saved.channel <= 16
+        ? Math.round(saved.channel) : DEFAULT_MIDI_CONFIG.channel,
+      restingChordStyle: typeof saved.restingChordStyle === 'number' && saved.restingChordStyle >= 1 && saved.restingChordStyle <= 4
+        ? Math.round(saved.restingChordStyle) : DEFAULT_MIDI_CONFIG.restingChordStyle,
+      pitchBendTilt: typeof saved.pitchBendTilt === 'boolean' ? saved.pitchBendTilt : DEFAULT_MIDI_CONFIG.pitchBendTilt,
+    };
   } catch {
-    return { ...DEFAULT_MIDI_MAP };
+    return { ...DEFAULT_MIDI_CONFIG };
   }
 }
 
-export function saveMidiMap(map: MidiMap): void {
+export function saveMidiConfig(config: MidiConfig): void {
   try {
-    localStorage.setItem(MIDI_STORAGE_KEY, JSON.stringify(map));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
   } catch {
-    // localStorage unavailable
+    // localStorage unavailable (private mode, quota) — settings just won't persist.
   }
 }
 
-/** Display helper for MIDI messages */
-export function displayMidiMessage(spec: MidiMessageSpec): string {
-  switch (spec.type) {
-    case 'note': return `Note ${spec.note} Ch ${spec.channel}`;
-    case 'cc': return `CC ${spec.controller} Ch ${spec.channel}`;
-    case 'pitchbend': return `Pitch Bend Ch ${spec.channel}`;
-    case 'program': return `Program Ch ${spec.channel}`;
-    default: return 'Unknown';
-  }
+/** Note name for a MIDI number, e.g. 60 → "C4". */
+export function noteName(note: number): string {
+  const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  return `${names[((note % 12) + 12) % 12]}${Math.floor(note / 12) - 1}`;
 }

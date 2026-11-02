@@ -1,4 +1,7 @@
-import { useSettings, effectiveApiKey, KILO_URL, type Thinking } from '../state/settings';
+import {
+  useSettings, effectiveApiKey, autoChain, KILO_URL, OPENROUTER_URL, CEREBRAS_URL,
+  type Provider, type SettingsValues, type Thinking,
+} from '../state/settings';
 import { getFirebaseApp } from '../cloud/firebase';
 import { hasAiConsent } from '../legal/acceptance';
 
@@ -54,6 +57,8 @@ export interface StreamHandlers {
   onThought?: (delta: string) => void;
   /** The free host is rate-limited: waiting this many seconds before asking again. */
   onWait?: (seconds: number) => void;
+  /** A host ran out and the chain moved to the next one. */
+  onNote?: (message: string) => void;
 }
 
 export interface LlmResult {
@@ -180,25 +185,103 @@ const WHISPER_MODEL = 'whisper-large-v3-turbo';
 
 interface CompatHost {
   /** Starts every error ("Groq 429: …") so explainError can tell hosts apart. */
-  name: 'Groq' | 'Pollinations' | 'FreeLLMAPI' | 'Kilo';
+  name: 'Groq' | 'Pollinations' | 'FreeLLMAPI' | 'Kilo' | 'OpenRouter' | 'Cerebras';
+  /** The settings provider this host came from, for the cooldown book. */
+  provider: Provider;
   chatUrl: string;
-  /** Empty for the free host without a token. */
+  /** Empty for the free hosts that need no token. */
   key: string;
   model: string;
   /** Where voice messages go to become text (Whisper); null when the host can't. */
   transcribeUrl: string | null;
+  /** Extra headers the host wants (OpenRouter attributes the caller). */
+  headers?: Record<string, string>;
 }
 
-function compatHost(): CompatHost {
-  const s = useSettings.getState();
-  if (s.provider === 'free') return { name: 'Pollinations', chatUrl: FREE_CHAT, key: s.freeKey.trim(), model: s.freeModel, transcribeUrl: null };
-  if (s.provider === 'kilo') return { name: 'Kilo', chatUrl: `${KILO_URL}/chat/completions`, key: '', model: s.kiloModel, transcribeUrl: null };
-  if (s.provider === 'freellmapi') {
-    const key = s.freellmapiKey.trim();
-    if (!key) throw new Error('No FreeLLMAPI key. Add it in Settings.');
-    return { name: 'FreeLLMAPI', chatUrl: `${s.freellmapiUrl}/chat/completions`, key, model: s.freellmapiModel, transcribeUrl: `${s.freellmapiUrl}/audio/transcriptions` };
+/** One host per provider, or null when its credentials are missing. */
+function hostFor(p: Provider, s: SettingsValues): CompatHost | null {
+  switch (p) {
+    case 'free':
+      return { name: 'Pollinations', provider: p, chatUrl: FREE_CHAT, key: s.freeKey.trim(), model: s.freeModel, transcribeUrl: null };
+    case 'kilo':
+      return { name: 'Kilo', provider: p, chatUrl: `${KILO_URL}/chat/completions`, key: '', model: s.kiloModel, transcribeUrl: null };
+    case 'freellmapi': {
+      const key = s.freellmapiKey.trim();
+      if (!key) return null;
+      return { name: 'FreeLLMAPI', provider: p, chatUrl: `${s.freellmapiUrl}/chat/completions`, key, model: s.freellmapiModel, transcribeUrl: `${s.freellmapiUrl}/audio/transcriptions` };
+    }
+    case 'groq': {
+      const key = s.groqKey.trim();
+      if (!key) return null;
+      return { name: 'Groq', provider: p, chatUrl: `${GROQ_API}/chat/completions`, key, model: s.groqModel, transcribeUrl: `${GROQ_API}/audio/transcriptions` };
+    }
+    case 'openrouter': {
+      const key = s.openrouterKey.trim();
+      if (!key) return null;
+      return {
+        name: 'OpenRouter', provider: p, chatUrl: `${OPENROUTER_URL}/chat/completions`, key, model: s.openrouterModel, transcribeUrl: null,
+        // OpenRouter asks callers to identify themselves; it shows up in the dashboard.
+        // The whole chain is built up front, so this must not assume a browser.
+        headers: {
+          ...(typeof location === 'undefined' ? {} : { 'HTTP-Referer': location.origin }),
+          'X-Title': 'Gesto Studio',
+        },
+      };
+    }
+    case 'cerebras': {
+      const key = s.cerebrasKey.trim();
+      if (!key) return null;
+      return { name: 'Cerebras', provider: p, chatUrl: `${CEREBRAS_URL}/chat/completions`, key, model: s.cerebrasModel, transcribeUrl: null };
+    }
+    default:
+      return null;
   }
-  return { name: 'Groq', chatUrl: `${GROQ_API}/chat/completions`, key: groqKey(), model: s.groqModel, transcribeUrl: `${GROQ_API}/audio/transcriptions` };
+}
+
+const MISSING_KEY: Partial<Record<Provider, string>> = {
+  freellmapi: 'No FreeLLMAPI key. Add it in Settings.',
+  groq: 'No Groq API key. Add one in Settings.',
+  openrouter: 'No OpenRouter API key. Add one in Settings.',
+  cerebras: 'No Cerebras API key. Add one in Settings.',
+};
+
+// Rate-limit book: a host that just said 429 is skipped until its window passes,
+// so rotation does not waste a call on it every turn. Cleared on reload.
+const coolingUntil = new Map<Provider, number>();
+const onCooldown = (p: Provider) => (coolingUntil.get(p) ?? 0) > Date.now();
+
+/** Note that a host is rate-limited for `seconds`, so the chain steps past it. */
+function startCooldown(p: Provider, seconds: number) {
+  coolingUntil.set(p, Date.now() + Math.max(5, seconds) * 1000);
+}
+
+/** Test hook: the cooldown book is module state and would leak between cases. */
+export function resetCooldowns() {
+  coolingUntil.clear();
+}
+
+/** How long until every host in the chain is out of cooldown, in seconds. */
+function soonestFree(chain: CompatHost[]): number {
+  const waits = chain.map((h) => Math.ceil(((coolingUntil.get(h.provider) ?? 0) - Date.now()) / 1000));
+  return Math.max(1, Math.min(...waits));
+}
+
+/**
+ * The hosts to try, in order. A named provider gives a chain of one; 'auto'
+ * gives every provider whose credentials exist, so when one runs out of free
+ * quota the next answers instead of the turn failing.
+ */
+function compatChain(): CompatHost[] {
+  const s = useSettings.getState();
+  if (s.provider !== 'auto') {
+    const host = hostFor(s.provider, s);
+    if (!host) throw new Error(MISSING_KEY[s.provider] ?? `No credentials for ${s.provider}. Add them in Settings.`);
+    return [host];
+  }
+  const chain = autoChain(s).map((p) => hostFor(p, s)).filter((h): h is CompatHost => !!h);
+  // Kilo and Pollinations need no key, so this should never be empty.
+  if (!chain.length) throw new Error('No model host is reachable. Add a key in Settings.');
+  return chain;
 }
 
 const authHeader = (key: string): Record<string, string> => (key ? { Authorization: `Bearer ${key}` } : {});
@@ -215,12 +298,6 @@ interface GroqChunk {
   }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   x_groq?: { usage?: { prompt_tokens?: number; completion_tokens?: number } };
-}
-
-function groqKey(): string {
-  const key = useSettings.getState().groqKey.trim();
-  if (!key) throw new Error('No Groq API key. Add one in Settings.');
-  return key;
 }
 
 async function hostError(name: CompatHost['name'], res: Response): Promise<Error> {
@@ -346,9 +423,14 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 const GROQ_EFFORT: Record<Thinking, 'low' | 'medium' | 'high'> = { MINIMAL: 'low', LOW: 'low', MEDIUM: 'medium', HIGH: 'high' };
 const GROQ_FINISH: Record<string, string> = { stop: 'STOP', tool_calls: 'STOP', length: 'MAX_TOKENS', content_filter: 'SAFETY' };
 
-async function streamCompat(req: LlmRequest, h: StreamHandlers): Promise<LlmResult> {
+/** Is this failure worth moving to the next host for, rather than giving up? */
+function isExhausted(status: number): boolean {
+  // 429 rate limit · 402 out of free credit · 401/403 key rejected · 5xx host down.
+  return status === 429 || status === 402 || status === 401 || status === 403 || status >= 500;
+}
+
+async function streamOneHost(host: CompatHost, req: LlmRequest, h: StreamHandlers, rotating: boolean): Promise<LlmResult> {
   // req.model names a Gemini model when callers pick one; on these hosts the user's choice wins.
-  const host = compatHost();
   const model = host.model;
   // The free host cuts every reply at 1500 tokens whatever max_tokens says, and GPT-OSS can spend
   // all of them reasoning before it acts. Low effort leaves room for the tool calls.
@@ -369,16 +451,26 @@ async function streamCompat(req: LlmRequest, h: StreamHandlers): Promise<LlmResu
       ...(req.json ? { response_format: { type: 'json_object' } } : {}),
       ...reasoning,
     });
+  const headers = { ...authHeader(host.key), ...host.headers, 'Content-Type': 'application/json' };
   let res: Response;
   // Anonymous free use allows one reply every ~30 s per connection: wait as told, then ask again.
+  // In 'auto' the chain has somewhere else to go, so don't stall here — fail over instead.
+  const waitInPlace = host.name === 'Pollinations' && !rotating;
   for (let tries = 0; ; tries++) {
-    res = await fetch(host.chatUrl, { method: 'POST', headers: { ...authHeader(host.key), 'Content-Type': 'application/json' }, signal: req.signal, body });
-    if (host.name !== 'Pollinations' || (res.status !== 402 && res.status !== 429) || tries >= FREE_RETRIES) break;
+    res = await fetch(host.chatUrl, { method: 'POST', headers, signal: req.signal, body });
+    if (!waitInPlace || (res.status !== 402 && res.status !== 429) || tries >= FREE_RETRIES) break;
     const seconds = await retryAfter(res);
     h.onWait?.(seconds);
     await sleep(seconds * 1000 + 400, req.signal);
   }
-  if (!res.ok || !res.body) throw await hostError(host.name, res);
+  if (!res.ok || !res.body) {
+    if (rotating && isExhausted(res.status)) {
+      // 401/403 is a bad key, not a quota: a long cooldown stops it being retried all session.
+      const seconds = res.status === 401 || res.status === 403 ? 900 : await retryAfter(res);
+      startCooldown(host.provider, seconds);
+    }
+    throw await hostError(host.name, res);
+  }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -424,6 +516,46 @@ async function streamCompat(req: LlmRequest, h: StreamHandlers): Promise<LlmResu
     parts.push({ functionCall: { name: c.name, args, ...(c.id ? { id: c.id } : {}) } });
   }
   return { content: { role: 'model', parts }, usage, finishReason };
+}
+
+/**
+ * Walk the chain until one host answers. This is what makes the free tiers feel
+ * limitless: each provider has a small quota, but they run out at different
+ * times, so a turn only fails when every one of them is down at once — and then
+ * it waits for the soonest window instead of erroring.
+ */
+async function streamCompat(req: LlmRequest, h: StreamHandlers): Promise<LlmResult> {
+  const chain = compatChain();
+  // One host means the user named it: run it directly, cooldowns and failover off.
+  if (chain.length === 1) return streamOneHost(chain[0], req, h, false);
+  const ready = chain.filter((host) => !onCooldown(host.provider));
+  // Everything is cooling down: wait for the first window rather than fail the turn.
+  if (!ready.length) {
+    const seconds = soonestFree(chain);
+    h.onWait?.(seconds);
+    await sleep(seconds * 1000 + 300, req.signal);
+    for (const host of chain) coolingUntil.delete(host.provider);
+    return streamCompat(req, h);
+  }
+  let lastError: unknown;
+  for (let i = 0; i < ready.length; i++) {
+    const host = ready[i];
+    try {
+      return await streamOneHost(host, req, h, true);
+    } catch (e) {
+      if (req.signal?.aborted) throw e;
+      lastError = e;
+      const status = Number(/\b(\d{3})\b/.exec(String((e as Error)?.message ?? ''))?.[1] ?? 0);
+      const network = /Failed to fetch|NetworkError|Load failed/i.test(String((e as Error)?.message ?? ''));
+      // A single-host chain has nowhere to go; a real error (400 bad request,
+      // malformed tools) must surface rather than silently hop providers.
+      const recoverable = network || isExhausted(status);
+      if (!recoverable) throw e;
+      if (network) startCooldown(host.provider, 60);
+      h.onNote?.(`${host.name} is unavailable — trying ${ready[i + 1]?.name ?? 'the next host'}.`);
+    }
+  }
+  throw lastError;
 }
 
 // ---------------------------------------------------------------- public

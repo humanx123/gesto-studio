@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Trash, Plus, Copy, Cloud, LogOut, RotateCcw } from '../icons';
-import { useSettings, MODELS, MAX_CUSTOM_INSTRUCTIONS, type Thinking, GROQ_MODELS, FREELLMAPI_MODELS, DEFAULT_FREELLMAPI_URL, KILO_MODELS } from '../../state/settings';
+import {
+  useSettings, MODELS, MAX_CUSTOM_INSTRUCTIONS, type Thinking, GROQ_MODELS, FREELLMAPI_MODELS,
+  DEFAULT_FREELLMAPI_URL, KILO_MODELS, OPENROUTER_MODELS, CEREBRAS_MODELS, autoChain, type Provider,
+} from '../../state/settings';
 import { useGatewayModels, useKiloModels } from '../useGatewayModels';
 import { firebaseConfigured, hostedAiEnabled } from '../../cloud/config';
 import { useAuth, signIn, signOut, deleteAccount } from '../../cloud/cloud';
@@ -14,6 +17,7 @@ import { THEMES, flowSeconds, useTheme, type ThemeId } from '../../state/theme';
 import { accentFill } from '../../state/accent';
 import { AccentPicker } from './AccentPicker';
 import { importMidiFile } from '../midiActions';
+import { connectWithUser } from '../../agent/freellmapi';
 import { openSavePreset } from './SavePreset';
 import { importProjectFile } from '../../state/projectFile';
 import { acknowledgeAi, hasAiConsent } from '../../legal/acceptance';
@@ -56,6 +60,95 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+/**
+ * Sign in to your own FreeLLMAPI the way the `ia` CLI does: it finds the
+ * server and fetches the unified key itself, so nothing has to be pasted.
+ * The password is used for the one exchange and never stored.
+ */
+function GatewaySignIn() {
+  const s = useSettings();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [state, setState] = useState<'idle' | 'working' | 'ok' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+
+  const connect = async () => {
+    if (!email.trim() || !password) {
+      setState('error');
+      setMessage('Enter the email and password of your FreeLLMAPI dashboard.');
+      return;
+    }
+    setState('working');
+    setMessage('Looking for your gateway…');
+    try {
+      const { url, key } = await connectWithUser(email.trim(), password, s.freellmapiUrl);
+      s.set({ freellmapiUrl: url, freellmapiKey: key });
+      setPassword(''); // not kept a moment longer than the exchange needs
+      setState('ok');
+      setMessage(`Connected to ${url.replace(/\/v1$/, '')} and saved its key.`);
+    } catch (e) {
+      setState('error');
+      setMessage((e as Error)?.message ?? 'Could not connect.');
+    }
+  };
+
+  return (
+    <div className="field">
+      <span>Sign in to your gateway</span>
+      <div className="gw-signin">
+        <input
+          type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com" autoComplete="username" spellCheck={false} aria-label="FreeLLMAPI email"
+        />
+        <input
+          type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+          placeholder="Dashboard password" autoComplete="current-password"
+          aria-label="FreeLLMAPI password"
+          onKeyDown={(e) => { if (e.key === 'Enter') void connect(); }}
+        />
+        <button className="btn" disabled={state === 'working'} onClick={() => void connect()}>
+          {state === 'working' ? 'Connecting…' : 'Connect'}
+        </button>
+      </div>
+      <small className={state === 'error' ? 'err' : undefined}>
+        {message || 'Finds FreeLLMAPI on this device and fetches its key for you, like the `ia` command does. The password is never saved.'}
+      </small>
+    </div>
+  );
+}
+
+/**
+ * What Auto will actually use. Free quotas are small individually, so the
+ * honest thing to show is how many hosts are in the rotation: one is a wall,
+ * several is effectively no wall.
+ */
+function AutoChainStatus() {
+  const s = useSettings();
+  const chain = autoChain(s);
+  const NAMES: Partial<Record<Provider, string>> = {
+    freellmapi: 'FreeLLMAPI', groq: 'Groq', cerebras: 'Cerebras', openrouter: 'OpenRouter', kilo: 'Kilo', free: 'Pollinations',
+  };
+  const keyless = chain.filter((p) => p === 'kilo' || p === 'free').length;
+  return (
+    <div className="field">
+      <span>Rotation</span>
+      <div className="auto-chain">
+        {chain.map((p, i) => (
+          <span key={p} className="auto-chain-step">
+            <b>{i + 1}</b> {NAMES[p]}
+          </span>
+        ))}
+      </div>
+      <small>
+        Tried in this order; when one runs out of free quota the next answers, so a turn
+        only fails if every host is empty at once — and then it waits for the first one to
+        free up instead of erroring.
+        {chain.length === keyless && ' Add a Groq, Cerebras or OpenRouter key (all free) to make the rotation deeper and quicker.'}
+      </small>
+    </div>
+  );
+}
+
 function AiSettings() {
   const s = useSettings();
   const user = useAuth((x) => x.user);
@@ -67,6 +160,13 @@ function AiSettings() {
   const free = s.provider === 'free';
   const gateway = s.provider === 'freellmapi';
   const kilo = s.provider === 'kilo';
+  const openrouter = s.provider === 'openrouter';
+  const cerebras = s.provider === 'cerebras';
+  const auto = s.provider === 'auto';
+  const [orKey, setOrKey] = useState(s.openrouterKey);
+  const [orModel, setOrModel] = useState(s.openrouterModel);
+  const [cbKey, setCbKey] = useState(s.cerebrasKey);
+  const [cbModel, setCbModel] = useState(s.cerebrasModel);
   const notGemini = groq || free || gateway || kilo;
   const [kiloModel, setKiloModel] = useState(s.kiloModel);
   useEffect(() => { setKiloModel(s.kiloModel); }, [s.kiloModel]);
@@ -105,8 +205,54 @@ function AiSettings() {
             <b>Kilo</b>
             <span>Free models, no key. Cannot listen.</span>
           </button>
+          <button className={`radio-card ${openrouter ? 'on' : ''}`} onClick={() => s.set({ provider: 'openrouter' })}>
+            <b>OpenRouter</b>
+            <span>Dozens of free models on one key. Cannot listen.</span>
+          </button>
+          <button className={`radio-card ${cerebras ? 'on' : ''}`} onClick={() => s.set({ provider: 'cerebras' })}>
+            <b>Cerebras</b>
+            <span>The quickest free tier. Cannot listen.</span>
+          </button>
+          <button className={`radio-card ${auto ? 'on' : ''}`} onClick={() => s.set({ provider: 'auto' })}>
+            <b>Auto · rotate</b>
+            <span>Uses whichever free host still has quota. Cannot listen.</span>
+          </button>
         </div>
       </div>
+      {auto && <AutoChainStatus />}
+      {openrouter && (
+        <>
+          <label className="field">
+            <span>OpenRouter key</span>
+            <input type="password" value={orKey} onChange={(e) => setOrKey(e.target.value)} onBlur={() => s.set({ openrouterKey: orKey.trim() })} placeholder="sk-or-v1-…" autoComplete="off" spellCheck={false} />
+            <small>Free from openrouter.ai/keys. Saved only in this browser and sent only to OpenRouter.</small>
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <input list="openrouter-models" value={orModel} onChange={(e) => setOrModel(e.target.value)} onBlur={() => s.set({ openrouterModel: orModel.trim() })} autoComplete="off" spellCheck={false} />
+            <datalist id="openrouter-models">
+              {OPENROUTER_MODELS.map((m) => <option key={m.id} value={m.id}>{m.name} - {m.blurb}</option>)}
+            </datalist>
+            <small>Any id from openrouter.ai/models. Those ending in <code>:free</code> cost nothing.</small>
+          </label>
+        </>
+      )}
+      {cerebras && (
+        <>
+          <label className="field">
+            <span>Cerebras key</span>
+            <input type="password" value={cbKey} onChange={(e) => setCbKey(e.target.value)} onBlur={() => s.set({ cerebrasKey: cbKey.trim() })} placeholder="csk-…" autoComplete="off" spellCheck={false} />
+            <small>Free from cloud.cerebras.ai. Saved only in this browser and sent only to Cerebras.</small>
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <input list="cerebras-models" value={cbModel} onChange={(e) => setCbModel(e.target.value)} onBlur={() => s.set({ cerebrasModel: cbModel.trim() })} autoComplete="off" spellCheck={false} />
+            <datalist id="cerebras-models">
+              {CEREBRAS_MODELS.map((m) => <option key={m.id} value={m.id}>{m.name} - {m.blurb}</option>)}
+            </datalist>
+          </label>
+        </>
+      )}
       {free && (
         <label className="field">
           <span>Pollinations token (optional)</span>
@@ -132,6 +278,7 @@ function AiSettings() {
       )}
       {gateway && (
         <>
+          <GatewaySignIn />
           <label className="field">
             <span>FreeLLMAPI address</span>
             <input value={gwUrl} onChange={(e) => setGwUrl(e.target.value)} onBlur={() => s.set({ freellmapiUrl: gwUrl.trim() || DEFAULT_FREELLMAPI_URL })} placeholder={DEFAULT_FREELLMAPI_URL} autoComplete="off" spellCheck={false} />

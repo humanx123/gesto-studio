@@ -49,7 +49,28 @@ export const KILO_MODELS = [
 ] as const;
 export const DEFAULT_KILO_MODEL = KILO_MODELS[0].id;
 
-export type Provider = 'gemini' | 'groq' | 'free' | 'freellmapi' | 'kilo';
+// OpenRouter fronts hundreds of models, dozens of them free (ids ending in ":free").
+// A free-tier key is needed; it allows browser calls, so no relay is required.
+export const OPENROUTER_URL = 'https://openrouter.ai/api/v1';
+export const OPENROUTER_MODELS = [
+  { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (free)', blurb: 'Strong reasoning and tool use. Default.' },
+  { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B (free)', blurb: 'Fast and reliable, no thinking step.' },
+  { id: 'qwen/qwen-2.5-72b-instruct:free', name: 'Qwen 2.5 72B (free)', blurb: 'Balanced; good at structured edits.' },
+] as const;
+export const DEFAULT_OPENROUTER_MODEL = OPENROUTER_MODELS[0].id;
+
+// Cerebras serves open models on their own silicon — the quickest free tier of the lot.
+export const CEREBRAS_URL = 'https://api.cerebras.ai/v1';
+export const CEREBRAS_MODELS = [
+  { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', blurb: 'Very fast. Default.' },
+  { id: 'qwen-3-32b', name: 'Qwen 3 32B', blurb: 'Quick, handles tools well.' },
+] as const;
+export const DEFAULT_CEREBRAS_MODEL = CEREBRAS_MODELS[0].id;
+
+export type Provider = 'auto' | 'gemini' | 'groq' | 'free' | 'freellmapi' | 'kilo' | 'openrouter' | 'cerebras';
+
+/** Providers the 'auto' chain walks, most generous first. */
+export const AUTO_ORDER: Provider[] = ['freellmapi', 'groq', 'cerebras', 'openrouter', 'kilo', 'free'];
 export type Connection = 'firebase' | 'apikey';
 export type Thinking = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type ListeningQuality = 'full' | 'balanced' | 'compact';
@@ -71,6 +92,10 @@ interface SettingsState {
   freellmapiKey: string;
   freellmapiModel: string;
   kiloModel: string;
+  openrouterKey: string;
+  openrouterModel: string;
+  cerebrasKey: string;
+  cerebrasModel: string;
   thinking: Thinking;
   /** Let the agent bounce and listen to its own work without asking. */
   autoListen: boolean;
@@ -105,7 +130,7 @@ export type SettingsValues = Omit<SettingsState, 'set'>;
 /** Fill defaults and drop invalid values, for localStorage and for settings synced from another device. */
 export function sanitizeSettings(saved: Partial<Record<keyof SettingsValues, unknown>>): SettingsValues {
   return {
-    provider: saved.provider === 'groq' || saved.provider === 'free' || saved.provider === 'freellmapi' || saved.provider === 'kilo' ? saved.provider : 'gemini',
+    provider: (['auto', 'groq', 'free', 'freellmapi', 'kilo', 'openrouter', 'cerebras'] as Provider[]).includes(saved.provider as Provider) ? (saved.provider as Provider) : 'gemini',
     model: MODELS.some((m) => m.id === saved.model) ? (saved.model as ModelId) : 'gemini-3.8-flash',
     connection: hostedAiEnabled ? (saved.connection === 'apikey' ? 'apikey' : 'firebase') : 'apikey',
     apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : '',
@@ -117,6 +142,10 @@ export function sanitizeSettings(saved: Partial<Record<keyof SettingsValues, unk
     freellmapiKey: typeof saved.freellmapiKey === 'string' ? saved.freellmapiKey : '',
     freellmapiModel: typeof saved.freellmapiModel === 'string' && saved.freellmapiModel.trim() ? saved.freellmapiModel.trim() : DEFAULT_FREELLMAPI_MODEL,
     kiloModel: typeof saved.kiloModel === 'string' && saved.kiloModel.trim() ? saved.kiloModel.trim() : DEFAULT_KILO_MODEL,
+    openrouterKey: typeof saved.openrouterKey === 'string' ? saved.openrouterKey : '',
+    openrouterModel: typeof saved.openrouterModel === 'string' && saved.openrouterModel.trim() ? saved.openrouterModel.trim() : DEFAULT_OPENROUTER_MODEL,
+    cerebrasKey: typeof saved.cerebrasKey === 'string' ? saved.cerebrasKey : '',
+    cerebrasModel: typeof saved.cerebrasModel === 'string' && saved.cerebrasModel.trim() ? saved.cerebrasModel.trim() : DEFAULT_CEREBRAS_MODEL,
     thinking: THINKING.includes(saved.thinking as Thinking) ? (saved.thinking as Thinking) : 'MEDIUM',
     autoListen: typeof saved.autoListen === 'boolean' ? saved.autoListen : true,
     customInstructions: typeof saved.customInstructions === 'string' ? saved.customInstructions.slice(0, MAX_CUSTOM_INSTRUCTIONS) : '',
@@ -144,10 +173,37 @@ export function effectiveApiKey(): string {
   return useSettings.getState().apiKey.trim() || envKey.trim();
 }
 
+/** Does this provider have what it needs to answer right now? */
+export function providerReady(p: Provider, s: SettingsValues): boolean {
+  switch (p) {
+    case 'free':
+    case 'kilo': return true; // no key needed
+    case 'freellmapi': return !!s.freellmapiKey.trim();
+    case 'groq': return !!s.groqKey.trim();
+    case 'openrouter': return !!s.openrouterKey.trim();
+    case 'cerebras': return !!s.cerebrasKey.trim();
+    case 'gemini': return s.connection === 'firebase' ? hostedAiEnabled : !!(s.apiKey.trim() || envKey.trim());
+    default: return false;
+  }
+}
+
+/** The providers 'auto' can actually reach, in rotation order. Kilo and Pollinations
+ *  need no key, so this is never empty. */
+export function autoChain(s: SettingsValues = useSettings.getState()): Provider[] {
+  return AUTO_ORDER.filter((p) => providerReady(p, s));
+}
+
 export function aiAvailable(): { ok: boolean; reason?: string } {
   if (!hasAiConsent()) return { ok: false, reason: 'Review the AI terms and data notice in Settings before using the agent.' };
   const s = useSettings.getState();
+  if (s.provider === 'auto') return { ok: true }; // Kilo and Pollinations always stand in
   if (s.provider === 'free' || s.provider === 'kilo') return { ok: true };
+  if (s.provider === 'openrouter') {
+    return s.openrouterKey.trim() ? { ok: true } : { ok: false, reason: 'Add an OpenRouter API key in Settings to use the agent.' };
+  }
+  if (s.provider === 'cerebras') {
+    return s.cerebrasKey.trim() ? { ok: true } : { ok: false, reason: 'Add a Cerebras API key in Settings to use the agent.' };
+  }
   if (s.provider === 'freellmapi') {
     return s.freellmapiKey.trim() ? { ok: true } : { ok: false, reason: 'Add your FreeLLMAPI key in Settings to use the agent.' };
   }
