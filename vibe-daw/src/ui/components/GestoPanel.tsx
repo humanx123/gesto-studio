@@ -132,6 +132,19 @@ function RecordBar() {
 const BASS_PRESETS = PRESETS.filter((p) => p.family === 'bass');
 
 /** Live band: drums and a bass that follow the chord in your hands, recorded with the pads. */
+/** How much the hands are driving the reactive band right now. */
+function EnergyMeter() {
+  const energy = useGesto((x) => x.energy);
+  const live = useGesto((x) => x.bandLive);
+  const label = energy < 0.3 ? 'Calm' : energy < 0.55 ? 'Groove' : energy < 0.75 ? 'Busy' : 'Full';
+  return (
+    <div className="gesto-energy" title="Energy from your hands">
+      <span>Energy · {live ? label : 'press play'}</span>
+      <span className="gesto-meter"><span style={{ width: `${Math.round(energy * 100)}%` }} /></span>
+    </div>
+  );
+}
+
 function BandSettings() {
   const s = useGesto((x) => x.settings);
   const set = useGesto((x) => x.setSettings);
@@ -144,6 +157,11 @@ function BandSettings() {
       </label>
       {s.band && (
         <div className="gesto-settings">
+          <label className="toggle">
+            <input type="checkbox" checked={s.reactive} onChange={(e) => set({ reactive: e.target.checked })} />
+            <span>Reacts to your hands<small>The beat and bass are generated from your gestures: raise the right hand or move more for a fuller beat, tilt it left for halftime or right for hat rolls, flick a hand for a fill.</small></span>
+          </label>
+          {s.reactive && <EnergyMeter />}
           <label className="field">
             <span>Groove</span>
             <select value={s.groove} onChange={(e) => set({ groove: e.target.value as Groove })}>
@@ -153,9 +171,16 @@ function BandSettings() {
           </label>
           <label className="field">
             <span>Bass</span>
-            <select value={s.bassStyle} onChange={(e) => set({ bassStyle: e.target.value as BassStyle })}>
-              {BASS_STYLES.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
+            {s.reactive ? (
+              <select value={s.bassStyle === 'off' ? 'off' : 'react'} onChange={(e) => set({ bassStyle: e.target.value === 'off' ? 'off' : 'kick' })}>
+                <option value="react">Generated (locks to the beat)</option>
+                <option value="off">No bass</option>
+              </select>
+            ) : (
+              <select value={s.bassStyle} onChange={(e) => set({ bassStyle: e.target.value as BassStyle })}>
+                {BASS_STYLES.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            )}
           </label>
           <label className="field">
             <span>Bass sound</span>

@@ -175,3 +175,127 @@ export function stepsToNextBass(style: BassStyle, groove: Groove, step: number):
 export function bassRootFor(rootPitchClass: number): number {
   return 36 + (((rootPitchClass % 12) + 12) % 12);
 }
+
+// ---------------------------------------------------------------- reactive groove
+// The band generates its bar from the hands instead of repeating the groove: the groove's
+// pattern is the skeleton, and the energy of the hands decides how much of it plays and what
+// grows around it. Choices are a hash of (bar, step), so a bar is stable while it plays but
+// the next one varies.
+
+/** What the hands say about the groove right now. */
+export interface Feel {
+  /** 0 calm … 1 full: right-hand height plus how much the hands move. */
+  energy: number;
+  /** Right-hand tilt, -1..1: left = halftime, right = hat rolls. */
+  tilt: number;
+  /** Position 0–3 inside a fill a hand flick asked for; null when none. */
+  fillStep: number | null;
+  /** Crash on this step (the beat after a fill). */
+  crash: boolean;
+}
+
+export const CALM: Feel = { energy: 0.35, tilt: 0, fillStep: null, crash: false };
+
+/** A stable pseudo-random number in [0, 1) for this bar, step and purpose. */
+export function chance(bar: number, step: number, salt: number): number {
+  let h = (bar * 374761393 + step * 668265263 + salt * 2147483647) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+const HALF_TILT = -0.45;
+const ROLL_TILT = 0.45;
+const KICK_EXTRA = [3, 6, 7, 10, 11, 14];
+const GHOST_SNARE = [7, 9, 15];
+
+const hitOn = (c: string | undefined, e: number) => c === 'X' || (c === 'x' && e > 0.2) || (c === 'o' && e > 0.5);
+
+/** Whether the generated bar has a kick on this 16th (the reactive bass plays on these). */
+export function reactiveKick(groove: Groove, step: number, bar: number, feel: Feel): number | null {
+  const i = step % 16;
+  if (groove === 'off') return i === 0 || i === 8 ? 0.9 : null;
+  const e = feel.energy;
+  const c = PATTERNS[groove].kick[i];
+  if (feel.tilt < HALF_TILT) {
+    // Halftime: the downbeat, plus one push before the snare on beat 3 when the hands are up.
+    if (i === 0) return 1;
+    if (i === 6 && e > 0.55) return 0.7;
+    return i === 10 && e > 0.4 ? 0.8 : null;
+  }
+  if (hitOn(c, e)) return c === 'X' ? 1 : 0.82;
+  if (e > 0.55 && KICK_EXTRA.includes(i) && chance(bar, i, 1) < (e - 0.55) * 1.6) return 0.72;
+  return null;
+}
+
+/** Drum hits on one 16th of a generated bar. `offset` (beats) places roll notes between 16ths. */
+export function reactiveDrumHits(groove: Groove, step: number, bar: number, lanes: DrumLane[], percussion: boolean, feel: Feel): Array<DrumHit & { offset?: number }> {
+  const i = step % 16;
+  const e = feel.energy;
+  const hits: Array<DrumHit & { offset?: number }> = [];
+  const add = (lane: string, velocity: number, offset?: number, exact = false) => {
+    const note = exact ? lanes.find((l) => l.name === lane)?.note ?? null : laneNote(lanes, lane);
+    if (note !== null && !hits.some((h) => h.note === note && h.offset === offset)) hits.push({ note, velocity: Math.max(0.15, Math.min(1, velocity * (0.78 + 0.22 * e))), ...(offset ? { offset } : {}) });
+  };
+  if (feel.crash) add('crash', 0.8, undefined, true);
+  if (groove === 'off') return hits;
+  const pattern = PATTERNS[groove];
+
+  // A fill replaces the beat: snare 16ths that build, the last one doubled, kick under the first.
+  if (feel.fillStep !== null) {
+    add('snare', 0.55 + feel.fillStep * 0.13);
+    if (feel.fillStep === 0) add('kick', 0.9);
+    if (feel.fillStep === 3) add('snare', 0.9, 0.125);
+    return hits;
+  }
+
+  const kick = reactiveKick(groove, step, bar, feel);
+  if (kick !== null) add('kick', kick);
+
+  // Backbeat (snare or clap, whichever the groove uses).
+  const back = pattern.snare ? 'snare' : 'clap';
+  const bc = pattern[back][i];
+  if (feel.tilt < HALF_TILT ? i === 8 : hitOn(bc, e)) add(back, bc === 'X' || i === 8 ? 1 : 0.75);
+  else if (e > 0.5 && GHOST_SNARE.includes(i) && chance(bar, i, 2) < e - 0.4) add('snare', 0.32);
+
+  // Hats thin out when calm, fill every 16th when the hands are up, roll when tilted right.
+  const hatLane = pattern.hat ? 'hat' : 'openhat';
+  const hc = pattern[hatLane][i];
+  const hatOn = e < 0.3 ? i % 4 === 0 : e < 0.55 ? hc === 'X' || hc === 'x' : hc !== '.' || (e > 0.75 && i % 2 === 1);
+  const rolling = feel.tilt > ROLL_TILT && i >= 12;
+  if (hatOn || rolling) add(hatLane, hc === 'X' ? 0.95 : hc === 'x' ? 0.75 : 0.45);
+  if (rolling) add(hatLane, 0.4 + (i - 12) * 0.12, 0.125);
+  if (e > 0.72 && i === 14 && hatLane === 'hat') add('openhat', 0.6, undefined, true);
+
+  if ((percussion || e > 0.7) && PERCUSSION[groove][i] !== '.' && chance(bar, i, 3) < 0.4 + e * 0.6) add('perc', PERCUSSION[groove][i] === 'x' ? 0.7 : 0.4);
+
+  // The phrase still breathes: a snare pickup closes every 4th bar once there is some energy.
+  if (e > 0.35 && bar % 4 === 3 && (i === 14 || i === 15)) add('snare', i === 15 ? 0.7 : 0.5);
+  return hits;
+}
+
+/** The bass of a generated bar: it locks to the generated kick, and grows octaves and fifths with energy. */
+export function reactiveBassStep(groove: Groove, step: number, bar: number, feel: Feel): BassStep | null {
+  const i = step % 16;
+  const e = feel.energy;
+  if (feel.fillStep !== null) return feel.fillStep === 0 ? { interval: 0, steps: 4, velocity: 0.85 } : null;
+  if (e < 0.25) return i % 8 === 0 ? { interval: 0, steps: 8, velocity: 0.82 } : null;
+  const kick = reactiveKick(groove, step, bar, feel);
+  if (kick !== null) {
+    let next = 16;
+    for (let j = i + 1; j < 16; j++) if (reactiveKick(groove, j, bar, feel) !== null) { next = j; break; }
+    const jump = i !== 0 && e > 0.7 && chance(bar, i, 5) < 0.35;
+    return { interval: jump ? (chance(bar, i, 6) < 0.5 ? 12 : 7) : 0, steps: next - i, velocity: i === 0 ? 0.95 : 0.85 };
+  }
+  if (e > 0.6 && i % 4 === 2 && chance(bar, i, 7) < (e - 0.6) * 1.5) return { interval: 12, steps: 1, velocity: 0.68 };
+  // Leading into the next bar: the fifth on the last 8th when the hands are high.
+  if (e > 0.8 && i === 14 && chance(bar, i, 8) < 0.5) return { interval: 7, steps: 2, velocity: 0.75 };
+  return null;
+}
+
+/** Steps to the next reactive bass onset in the bar (how long a chord-change hit rings). */
+export function reactiveStepsToNextBass(groove: Groove, step: number, bar: number, feel: Feel): number {
+  const i = step % 16;
+  for (let j = i + 1; j < 16; j++) if (reactiveBassStep(groove, j, bar, feel)) return j - i;
+  return 16 - i;
+}

@@ -1304,6 +1304,7 @@ body { background: var(--app-bg); }
 .gesto-chord.on b { background: var(--agent-fill); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .gesto-meter { display: block; height: 3px; border-radius: 2px; background: var(--raised); overflow: hidden; }
 .gesto-meter span { display: block; height: 100%; background: var(--agent-fill); transition: width 0.08s linear; }
+.gesto-energy { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted, var(--faint)); }
 .gesto-inputs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .gesto-inputs .btn { justify-content: center; }
 .gesto-err { display: flex; gap: 6px; align-items: flex-start; }

@@ -24,12 +24,23 @@ describe('Gesto panel', () => {
 describe('Gesto panel with the live band on', () => {
   it('shows groove, bass style, bass sound and percussion', async () => {
     // Server rendering reads a store's initial state, so start from saved settings, as a returning player would.
-    localStorage.setItem('gesto:estudio', JSON.stringify({ band: true }));
+    localStorage.setItem('gesto:estudio', JSON.stringify({ band: true, reactive: false }));
     vi.resetModules();
     const { GestoPanel: Fresh } = await import('../ui/components/GestoPanel');
     const html = renderToString(createElement(Fresh, { hidden: false }));
     for (const text of ['Groove', 'Boom bap', 'Reggaetón (dembow)', 'No drums', 'Follows the kick', 'Walking', 'Bass sound', "Groove&#x27;s own (Electric Bass)", '808', 'Percussion']) {
       expect(html, text).toContain(text);
     }
+  });
+});
+
+describe('Gesto panel with the reactive band', () => {
+  it('shows the reactive switch, the energy meter and the generated bass', async () => {
+    localStorage.setItem('gesto:estudio', JSON.stringify({ band: true }));
+    vi.resetModules();
+    const { GestoPanel: Fresh } = await import('../ui/components/GestoPanel');
+    const html = renderToString(createElement(Fresh, { hidden: false }));
+    for (const text of ['Reacts to your hands', 'Energy', 'Generated (locks to the beat)', 'No bass']) expect(html, text).toContain(text);
+    expect(html).not.toContain('Follows the kick');
   });
 });

@@ -12,7 +12,7 @@ import { beatsPerBar, createMidiClip, createTrack, defaultDrumLanes } from '../m
 import { defaultPresetParams } from '../model/catalog';
 import type { Project, Track } from '../model/types';
 import { getProject, useDaw, useTransport } from '../state/store';
-import { bassRootFor, bassStep, drumHits, GROOVES, stepsToNextBass, type BassStyle, type Groove } from './band';
+import { bassRootFor, bassStep, CALM, drumHits, GROOVES, reactiveBassStep, reactiveDrumHits, reactiveStepsToNextBass, stepsToNextBass, type BassStyle, type Feel, type Groove } from './band';
 import { LiveTake, PartTake, type Bounds, type PartNote } from './take';
 import { gestoKeyFor, sameVoicing, voiceReading, type Voicing } from './voicing';
 
@@ -41,6 +41,8 @@ export interface GestoSettings {
   bassPreset: string | null;
   /** Blur the camera feed so faces stay out of frame while the hand tracking still works. */
   privacy: boolean;
+  /** The band generates its beat and bass from the hands (energy, tilt, flicks) instead of looping the groove. */
+  reactive: boolean;
 }
 
 export type GestoInput = 'off' | 'camera' | 'keyboard';
@@ -61,6 +63,8 @@ interface GestoState {
   captured: number;
   /** The band is placing notes right now (needs the song playing). */
   bandLive: boolean;
+  /** Energy the hands give the reactive band, 0–1 (for the meter). */
+  energy: number;
   setSettings: (patch: Partial<GestoSettings>) => void;
 }
 
@@ -76,7 +80,7 @@ function loadSettings(): GestoSettings {
   const key = gestoKeyFor(getProject().key);
   const base: GestoSettings = {
     keyOffset: key.keyOffset, harmony: key.harmony, style: 'fingers', octave: 0, bass: false, arp: 0, quantize: 0.25,
-    band: false, groove: 'boombap', percussion: false, bassStyle: 'kick', bassPreset: null, privacy: false,
+    band: false, groove: 'boombap', percussion: false, bassStyle: 'kick', bassPreset: null, privacy: false, reactive: true,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as Partial<Record<keyof GestoSettings, unknown>>;
@@ -94,6 +98,7 @@ function loadSettings(): GestoSettings {
       bassStyle: BASS_IDS.includes(saved.bassStyle as BassStyle) ? (saved.bassStyle as BassStyle) : base.bassStyle,
       bassPreset: typeof saved.bassPreset === 'string' ? saved.bassPreset : null,
       privacy: typeof saved.privacy === 'boolean' ? saved.privacy : base.privacy,
+      reactive: typeof saved.reactive === 'boolean' ? saved.reactive : base.reactive,
     };
   } catch {
     return base;
@@ -113,6 +118,7 @@ export const useGesto = create<GestoState>((set, get) => ({
   recording: false,
   captured: 0,
   bandLive: false,
+  energy: CALM.energy,
   setSettings: (patch) => {
     const before = get().settings;
     const settings = { ...before, ...patch };
@@ -291,10 +297,48 @@ function release() {
   useGesto.setState({ chord: null, volume: 0 });
 }
 
+// ---------------------------------------------------------------- feel (reactive band)
+// Energy = right-hand height (the pads' volume) plus how much the hands move, smoothed so the
+// beat swells and settles instead of flickering. A quick flick of either hand asks for a fill.
+
+const FLICK_SPEED = 2.4; // screen widths per second
+const FLICK_COOLDOWN_MS = 1200;
+let motion = 0;
+let energy = CALM.energy;
+let tilt = 0;
+let lastMove: { t: number; pts: Array<{ x: number; y: number } | null> } | null = null;
+let lastFlick = -Infinity;
+let fillWanted = false;
+
+/** Fold one frame's hands into the band's feel. Exported for tests. */
+export function feelFrame(frame: HandFrame, reading: { playing: boolean; volume: number; tilt: number }, now: number) {
+  const pts = [frame.left, frame.right].map((h) => (h ? { x: h.positionX, y: h.positionY } : null));
+  if (lastMove) {
+    const dt = Math.max(0.008, (now - lastMove.t) / 1000);
+    let speed = 0;
+    pts.forEach((p, i) => { const q = lastMove!.pts[i]; if (p && q) speed = Math.max(speed, Math.hypot(p.x - q.x, p.y - q.y) / dt); });
+    if (speed > FLICK_SPEED && now - lastFlick > FLICK_COOLDOWN_MS) { lastFlick = now; fillWanted = true; }
+    // Motion rises fast and falls over about a second.
+    const k = speed > motion ? 1 - Math.exp(-dt / 0.12) : 1 - Math.exp(-dt / 0.9);
+    motion += (Math.min(1.5, speed) - motion) * k;
+    const target = Math.min(1, (reading.playing ? 0.1 + reading.volume * 0.7 : 0.3) + motion * 0.45);
+    energy += (target - energy) * (1 - Math.exp(-dt / 0.35));
+  }
+  lastMove = { t: now, pts };
+  tilt = reading.playing ? reading.tilt : 0;
+  if (Math.abs(energy - useGesto.getState().energy) > 0.03) useGesto.setState({ energy });
+}
+
+function resetFeel() {
+  motion = 0; energy = CALM.energy; tilt = 0; lastMove = null; fillWanted = false; fillLeft = 0; crashNext = false;
+  useGesto.setState({ energy });
+}
+
 function onFrame(frame: HandFrame) {
   lastFrame = frame;
   const s = useGesto.getState();
   const reading = reader.read(frame, { harmony: s.settings.harmony, style: s.settings.style });
+  feelFrame(frame, reading, performance.now());
   const next = reading.playing ? voiceReading(reading, s.settings) : null;
   followPlayhead();
 
@@ -386,6 +430,7 @@ export function stopInput() {
   window.removeEventListener('keydown', keyDown, true);
   window.removeEventListener('keyup', keyUp, true);
   lastFrame = null;
+  resetFeel();
   release();
   useGesto.setState({ input: 'off', status: 'idle' });
   void syncBand();
@@ -428,11 +473,24 @@ let nextStep = 0; // next 16th to place, in virtual beats × 4
 let bassNow: { root: number; startV: number; untilV: number; note: PartNote | null } | null = null;
 let bandReady = false;
 let bandPreparing: Promise<void> | null = null;
+let fillLeft = 0;
+let crashNext = false;
+
+/** The feel for the next 16th: a wanted fill starts here and runs four steps, then a crash. */
+function stepFeel(): Feel {
+  if (fillWanted && fillLeft === 0) { fillWanted = false; fillLeft = 4; }
+  const fillStep = fillLeft > 0 ? 4 - fillLeft : null;
+  const crash = fillLeft === 0 && crashNext;
+  if (fillLeft > 0 && --fillLeft === 0) crashNext = true;
+  else if (crash) crashNext = false;
+  return { energy, tilt, fillStep, crash };
+}
 
 function resetBand(fromBeat: number) {
   loopOffset = 0;
   nextStep = Math.ceil((fromBeat + guardBeats()) * 4);
   bassNow = null;
+  fillWanted = false; fillLeft = 0; crashNext = false;
 }
 
 const guardBeats = () => ((lookAheadSeconds() + 0.03) * getProject().bpm) / 60;
@@ -496,16 +554,22 @@ function placeBand(nowV: number) {
     const bar = Math.floor(beat / bpb + 1e-9);
     const step = Math.round((beat - bar * bpb) * 4);
     const recording = !!rec && vb >= rec.startV;
+    // Reactive bars vary with the jam's own bar count, so a looped section still changes.
+    const vbar = Math.floor(vb / bpb + 1e-9);
+    const feel = s.reactive ? stepFeel() : null;
 
     if (drumId) {
-      for (const hit of drumHits(s.groove, step, bar, lanes, s.percussion)) {
-        if (scheduleLive(drumId, beat, hit.note, 0.25, hit.velocity) && recording) rec!.drums.add({ beat, pitch: hit.note, duration: 0.25, velocity: hit.velocity });
+      const hits: Array<{ note: number; velocity: number; offset?: number }> = feel ? reactiveDrumHits(s.groove, step, vbar, lanes, s.percussion, feel) : drumHits(s.groove, step, bar, lanes, s.percussion);
+      for (const hit of hits) {
+        const at = beat + (hit.offset ?? 0);
+        const dur = hit.offset ? 0.125 : 0.25;
+        if (scheduleLive(drumId, at, hit.note, dur, hit.velocity) && recording) rec!.drums.add({ beat: at, pitch: hit.note, duration: dur, velocity: hit.velocity });
       }
     }
 
     if (bassId && s.bassStyle !== 'off') {
       const root = current ? bassRootFor(current.root) : null;
-      const pattern = root !== null ? bassStep(s.bassStyle, s.groove, step) : null;
+      const pattern = root === null ? null : feel ? reactiveBassStep(s.groove, step, vbar, feel) : bassStep(s.bassStyle, s.groove, step);
       const ringing = bassNow && bassNow.untilV > vb + 1e-6;
       const changed = ringing && bassNow!.root !== root;
       if (ringing && (pattern || changed)) {
@@ -514,7 +578,8 @@ function placeBand(nowV: number) {
         if (bassNow!.note) bassNow!.note.duration = vb - bassNow!.startV;
         bassNow = null;
       }
-      const play = pattern ?? (changed && root !== null ? { interval: 0, steps: stepsToNextBass(s.bassStyle, s.groove, step), velocity: 0.85 } : null);
+      const ring = feel ? reactiveStepsToNextBass(s.groove, step, vbar, feel) : stepsToNextBass(s.bassStyle, s.groove, step);
+      const play = pattern ?? (changed && root !== null ? { interval: 0, steps: ring, velocity: 0.85 } : null);
       if (play && root !== null) {
         const len = play.steps / 4;
         const pitch = root + play.interval;

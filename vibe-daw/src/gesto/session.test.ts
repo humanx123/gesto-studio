@@ -25,7 +25,7 @@ vi.mock('../engine/api', () => api);
 import { useDaw, useTransport } from '../state/store';
 import { createProject } from '../model/project';
 import type { MidiClip } from '../model/types';
-import { startKeyboard, startRecording, stopRecording, stopInput, useGesto } from './session';
+import { feelFrame, startKeyboard, startRecording, stopRecording, stopInput, useGesto } from './session';
 
 const key = (k: string, down = true) => env.listeners.get(down ? 'keydown' : 'keyup')!({ key: k, repeat: false, target: {}, preventDefault() {}, stopPropagation() {} });
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
@@ -134,7 +134,7 @@ describe('Gesto live band', () => {
   const calls = (trackId: string) => api.scheduleLive.mock.calls.filter((c) => c[0] === trackId) as unknown as Array<[string, number, number, number, number]>;
 
   it('plays drums and a bass that follows the chords, and records exactly what it played', async () => {
-    useGesto.getState().setSettings({ band: true, groove: 'boombap', bassStyle: 'kick' });
+    useGesto.getState().setSettings({ band: true, groove: 'boombap', bassStyle: 'kick', reactive: false });
     startKeyboard();
     key('1');
     env.step();
@@ -170,7 +170,7 @@ describe('Gesto live band', () => {
   });
 
   it('cuts a ringing bass note on a chord change and plays the new root at once', async () => {
-    useGesto.getState().setSettings({ band: true, groove: 'house', bassStyle: 'roots' });
+    useGesto.getState().setSettings({ band: true, groove: 'house', bassStyle: 'roots', reactive: false });
     startKeyboard();
     key('1'); env.step();
     await startRecording();
@@ -221,5 +221,36 @@ describe('Gesto live band', () => {
     expect(api.clearLive).toHaveBeenCalled();
     await playTo(3);
     expect(api.scheduleLive.mock.calls.length).toBe(placed);
+  });
+
+  it('reactive: generates drums and a bass on the chord, records them, and a hand flick plays a fill', async () => {
+    useGesto.getState().setSettings({ band: true, groove: 'trap', bassStyle: 'kick', reactive: true });
+    startKeyboard();
+    key('1'); env.step();
+    await startRecording();
+    await flush();
+    await playTo(4);
+    // A fast sweep of the right hand: the next steps become a snare fill, then a crash.
+    const hand = (x: number) => ({ landmarks: [], label: 'Right' as const, fingerCount: 3, extendedFingers: [], tiltAngle: 0, positionX: x, positionY: 0.5 });
+    feelFrame({ left: null, right: hand(0.2), source: 'camera' }, { playing: true, volume: 0.5, tilt: 0 }, 100000);
+    feelFrame({ left: null, right: hand(0.6), source: 'camera' }, { playing: true, volume: 0.5, tilt: 0 }, 100050);
+    const before = api.scheduleLive.mock.calls.length;
+    await playTo(7);
+    stopRecording();
+
+    const drums = trackNamed('Gesto Drums'), bass = trackNamed('Gesto Bass');
+    const hits = calls(drums.id);
+    expect(hits.some(([, , n]) => n === 36)).toBe(true);
+    // Four snares in a row on consecutive 16ths right after the flick.
+    const after = (api.scheduleLive.mock.calls.slice(before) as unknown as Array<[string, number, number]>).filter((c) => c[0] === drums.id);
+    const snareBeats = after.filter(([, , n]) => n === 38).map(([, b]) => b).sort((a, b) => a - b);
+    const run = snareBeats.findIndex((b, i) => [1, 2, 3].every((k) => snareBeats.some((x) => Math.abs(x - (b + k * 0.25)) < 1e-6)));
+    expect(run).toBeGreaterThanOrEqual(0);
+    expect(after.some(([, , n]) => n === 49)).toBe(true);
+    // The bass plays the chord's root (C) on the generated beat, and everything played was recorded.
+    expect(calls(bass.id).length).toBeGreaterThan(0);
+    expect(calls(bass.id).every(([, , p]) => [36, 43, 48].includes(p))).toBe(true);
+    const drumClip = clipsOf('Gesto Drums')[0];
+    expect(drumClip.notes.length).toBe(hits.filter(([, b]) => b < 7).length);
   });
 });
